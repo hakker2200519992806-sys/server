@@ -891,7 +891,7 @@ function copyText(t){{navigator.clipboard.writeText(t).then(()=>{{
 <!-- AI YORDAMCHI FLOATING WINDOW -->
 <div id="aiWindow" style="display:none;position:fixed;bottom:20px;right:20px;width:380px;height:480px;
   background:#161929;border:1px solid #252d45;border-radius:14px;box-shadow:0 12px 40px rgba(0,0,0,.6);
-  z-index:999999;display:none;flex-direction:column;overflow:hidden;min-width:260px;min-height:200px;resize:both;font-size:14px">
+  z-index:999999;flex-direction:column;overflow:hidden;min-width:260px;min-height:200px;resize:both;font-size:14px">
   <div id="aiHeader" style="padding:10px 14px;background:#1c2136;border-bottom:1px solid #252d45;
     cursor:move;display:flex;align-items:center;gap:8px;flex-shrink:0;user-select:none">
     <button onclick="openAITrainPanel()" style="background:transparent;border:1px solid #252d45;color:#7c6fff;
@@ -973,10 +973,27 @@ function copyText(t){{navigator.clipboard.writeText(t).then(()=>{{
 var aiWindowEl=null,aiDragging=false,aiDragX=0,aiDragY=0,aiStartX=0,aiStartY=0;
 function toggleAIWindow(){{
   var w=document.getElementById('aiWindow');
-  if(w.style.display==='flex'){{w.style.display='none';}}
-  else{{w.style.display='flex';document.getElementById('aiInput').focus();loadAIChatHistory();}}
+  if(w.style.display==='flex'){{
+    w.style.display='none';
+    localStorage.setItem('ai_window_open','0');
+  }}else{{
+    w.style.display='flex';
+    localStorage.setItem('ai_window_open','1');
+    document.getElementById('aiInput').focus();
+    loadAIChatHistory();
+  }}
 }}
-function closeAIWindow(){{document.getElementById('aiWindow').style.display='none';}}
+function closeAIWindow(){{
+  document.getElementById('aiWindow').style.display='none';
+  localStorage.setItem('ai_window_open','0');
+}}
+// Sahifa yuklanganda AI oynasi holatini tiklash
+(function(){{
+  if(localStorage.getItem('ai_window_open')==='1'){{
+    var w=document.getElementById('aiWindow');
+    if(w){{w.style.display='flex';setTimeout(loadAIChatHistory,300);}}
+  }}
+}})();
 function loadAIChatHistory(){{
   fetch('/api/ai/history',{{headers:{{'X-CSRF-Token':'{get_csrf_token()}'}}}}).then(r=>r.json()).then(d=>{{
     var msgs=document.getElementById('aiMessages');
