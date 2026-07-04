@@ -862,6 +862,8 @@ def _pg(title, body, act="dash", flash=None, ftype="ok"):
     {_nav('/files','📁 Fayllar','files'==act)}
     {_nav('/projects','💻 Loyihalar','projects'==act)}
     {_nav('/editor/new','✏️ Muharrir','editor'==act)}
+    <div class="sep">AI</div>
+    <a href="#" onclick="toggleAIWindow();return false;" class="{'act' if act=='ai' else ''}">🤖 AI Yordamchi</a>
     <div class="sep">Hisobot</div>
     {_nav('/stats','📈 Statistika','stats'==act)}
     {adm_nav}
@@ -885,6 +887,134 @@ def _pg(title, body, act="dash", flash=None, ftype="ok"):
 function copyText(t){{navigator.clipboard.writeText(t).then(()=>{{
   const e=event.target;const o=e.textContent;e.textContent='✓ Nusxalandi!';
   setTimeout(()=>e.textContent=o,1500);}});}}
+</script>
+<!-- AI YORDAMCHI FLOATING WINDOW -->
+<div id="aiWindow" style="display:none;position:fixed;bottom:20px;right:20px;width:380px;height:480px;
+  background:#161929;border:1px solid #252d45;border-radius:14px;box-shadow:0 12px 40px rgba(0,0,0,.6);
+  z-index:999999;display:none;flex-direction:column;overflow:hidden;min-width:260px;min-height:200px;resize:both;font-size:14px">
+  <div id="aiHeader" style="padding:10px 14px;background:#1c2136;border-bottom:1px solid #252d45;
+    cursor:move;display:flex;align-items:center;gap:8px;flex-shrink:0;user-select:none">
+    <span style="font-size:1.1rem">🤖</span>
+    <b style="color:#fff;font-size:.85rem;flex:1">AI Yordamchi</b>
+    <button onclick="openAITrainPanel()" style="background:transparent;border:1px solid #252d45;color:#7c6fff;
+      border-radius:5px;padding:3px 8px;font-size:.7rem;cursor:pointer" title="AI ni o'qitish">📚 O'qitish</button>
+    <button onclick="closeAIWindow()" style="background:transparent;border:1px solid #252d45;color:#f05d5d;
+      border-radius:5px;padding:3px 8px;font-size:.75rem;cursor:pointer;font-weight:700">✕</button>
+  </div>
+  <div id="aiMessages" style="flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px"></div>
+  <div style="padding:8px 12px;border-top:1px solid #252d45;display:flex;gap:6px;flex-shrink:0">
+    <input type="text" id="aiInput" placeholder="Savol yozing..."
+      style="flex:1;padding:8px 12px;background:#0d0f18;border:1px solid #252d45;border-radius:8px;
+      color:#d4daf0;font-size:.82rem;outline:none" onkeydown="if(event.key==='Enter')askAI()">
+    <button onclick="askAI()" style="background:#7c6fff;color:#fff;border:none;border-radius:8px;
+      padding:8px 14px;font-size:.8rem;cursor:pointer;font-weight:600">↑</button>
+  </div>
+</div>
+<!-- AI TRAIN PANEL -->
+<div id="aiTrainBg" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);
+  z-index:9999999;display:none;align-items:center;justify-content:center"
+  onclick="if(event.target.id==='aiTrainBg')closeAITrain()">
+  <div style="background:#1c2136;border:1px solid #252d45;border-radius:12px;width:92%;max-width:560px;
+    max-height:80vh;display:flex;flex-direction:column;overflow:hidden">
+    <div style="padding:12px 14px;border-bottom:1px solid #252d45;display:flex;align-items:center">
+      <b style="color:#fff">📚 AI ni o'qitish</b>
+      <button onclick="closeAITrain()" style="margin-left:auto;background:transparent;border:1px solid #252d45;
+        color:#f05d5d;border-radius:5px;padding:3px 8px;cursor:pointer">✕</button>
+    </div>
+    <div style="padding:14px;overflow-y:auto">
+      <p style="color:#5c6890;font-size:.79rem;margin-bottom:12px">Savol-javob juftliklarini qo'shib AI ni o'rgating.
+        AI shu ma'lumotlar asosida javob beradi. Barcha ma'lumotlar <code>ai_data/</code> papkasida saqlanadi.</p>
+      <div style="margin-bottom:10px"><label style="color:#5c6890;font-size:.76rem">Savol / kalit so'z:</label>
+        <input type="text" id="aiTrainQ" placeholder="Masalan: server qanday ishga tushadi?"
+          style="width:100%;padding:8px;background:#0d0f18;border:1px solid #252d45;border-radius:6px;color:#d4daf0;margin-top:4px"></div>
+      <div style="margin-bottom:10px"><label style="color:#5c6890;font-size:.76rem">Javob:</label>
+        <textarea id="aiTrainA" rows="4" placeholder="python server.py buyrug'ini terminada yozing..."
+          style="width:100%;padding:8px;background:#0d0f18;border:1px solid #252d45;border-radius:6px;color:#d4daf0;margin-top:4px;resize:vertical"></textarea></div>
+      <div style="margin-bottom:10px"><label style="color:#5c6890;font-size:.76rem">Kategoriya (ixtiyoriy):</label>
+        <input type="text" id="aiTrainCat" placeholder="masalan: server, python, html"
+          style="width:100%;padding:8px;background:#0d0f18;border:1px solid #252d45;border-radius:6px;color:#d4daf0;margin-top:4px"></div>
+      <button onclick="trainAI()" style="background:#7c6fff;color:#fff;border:none;border-radius:8px;
+        padding:8px 16px;cursor:pointer;font-weight:600;font-size:.82rem">💾 Saqlash</button>
+      <button onclick="loadAIKnowledge()" style="background:transparent;border:1px solid #252d45;color:#5c6890;border-radius:8px;
+        padding:8px 16px;cursor:pointer;font-size:.82rem;margin-left:8px">🔄 Yangilash</button>
+    </div>
+    <div id="aiKnowledgeList" style="border-top:1px solid #252d45;overflow-y:auto;max-height:30vh;padding:8px"></div>
+  </div>
+</div>
+<script>
+var aiWindowEl=null,aiDragging=false,aiDragX=0,aiDragY=0,aiStartX=0,aiStartY=0;
+function toggleAIWindow(){{
+  var w=document.getElementById('aiWindow');
+  if(w.style.display==='flex'){{w.style.display='none';}}
+  else{{w.style.display='flex';document.getElementById('aiInput').focus();}}
+}}
+function closeAIWindow(){{document.getElementById('aiWindow').style.display='none';}}
+function openAITrainPanel(){{document.getElementById('aiTrainBg').style.display='flex';loadAIKnowledge();}}
+function closeAITrain(){{document.getElementById('aiTrainBg').style.display='none';}}
+(function(){{
+  var hdr=document.getElementById('aiHeader');
+  var win=document.getElementById('aiWindow');
+  if(!hdr||!win) return;
+  hdr.addEventListener('mousedown',function(e){{
+    if(e.target.tagName==='BUTTON') return;
+    aiDragging=true;
+    aiDragX=e.clientX-win.offsetLeft;
+    aiDragY=e.clientY-win.offsetTop;
+    e.preventDefault();
+  }});
+  document.addEventListener('mousemove',function(e){{
+    if(!aiDragging) return;
+    win.style.left=(e.clientX-aiDragX)+'px';
+    win.style.top=(e.clientY-aiDragY)+'px';
+    win.style.right='auto';win.style.bottom='auto';
+  }});
+  document.addEventListener('mouseup',function(){{aiDragging=false;}});
+}})();
+function askAI(){{
+  var inp=document.getElementById('aiInput');
+  var q=inp.value.trim();if(!q) return;
+  inp.value='';
+  addAIMsg(q,'user');
+  addAIMsg('...','ai');
+  fetch('/api/ai/ask',{{method:'POST',headers:{{'Content-Type':'application/json','X-CSRF-Token':'{get_csrf_token()}'}},
+    body:JSON.stringify({{question:q}})}}).then(r=>r.json()).then(d=>{{
+    var msgs=document.getElementById('aiMessages');
+    msgs.lastChild.innerHTML=formatAIMsg(d.answer||'Javob topilmadi');
+  }}).catch(()=>{{
+    var msgs=document.getElementById('aiMessages');
+    msgs.lastChild.innerHTML='<span style="color:#f05d5d">Xato yuz berdi</span>';
+  }});
+}}
+function addAIMsg(text,role){{
+  var msgs=document.getElementById('aiMessages');
+  var div=document.createElement('div');
+  div.style.cssText=role==='user'?'align-self:flex-end;background:#7c6fff22;border:1px solid #7c6fff44;border-radius:10px 10px 2px 10px;padding:8px 12px;max-width:85%;color:#d4daf0;font-size:.82rem':'align-self:flex-start;background:#0d0f18;border:1px solid #252d45;border-radius:10px 10px 10px 2px;padding:8px 12px;max-width:85%;color:#d4daf0;font-size:.82rem';
+  div.innerHTML=role==='user'?text:formatAIMsg(text);
+  msgs.appendChild(div);
+  msgs.scrollTop=msgs.scrollHeight;
+}}
+function formatAIMsg(t){{return t.replace(/\\n/g,'<br>').replace(/`([^`]+)`/g,'<code style="background:#252d45;padding:1px 4px;border-radius:3px">$1</code>');}}
+function trainAI(){{
+  var q=document.getElementById('aiTrainQ').value.trim();
+  var a=document.getElementById('aiTrainA').value.trim();
+  var cat=document.getElementById('aiTrainCat').value.trim();
+  if(!q||!a){{alert('Savol va javob majburiy!');return;}}
+  fetch('/api/ai/train',{{method:'POST',headers:{{'Content-Type':'application/json','X-CSRF-Token':'{get_csrf_token()}'}},
+    body:JSON.stringify({{question:q,answer:a,category:cat}})}}).then(r=>r.json()).then(d=>{{
+    if(d.ok){{document.getElementById('aiTrainQ').value='';document.getElementById('aiTrainA').value='';
+      document.getElementById('aiTrainCat').value='';loadAIKnowledge();alert('Saqlandi!');}}}});
+}}
+function loadAIKnowledge(){{
+  fetch('/api/ai/knowledge').then(r=>r.json()).then(d=>{{
+    var list=document.getElementById('aiKnowledgeList');
+    list.innerHTML=(d.items||[]).map(function(it){{
+      return '<div style="padding:6px 10px;border-bottom:1px solid #252d45;font-size:.78rem;display:flex;gap:8px;align-items:center"><span style="color:#7c6fff;flex:1">'+it.question+'</span><span style="color:#5c6890;font-size:.68rem">'+(it.category||'')+'</span><button onclick="deleteAIItem('+it.id+')" style="background:transparent;border:none;color:#f05d5d;cursor:pointer;font-size:.75rem">🗑</button></div>';
+    }}).join('')||'<p style="padding:12px;color:#5c6890;text-align:center;font-size:.78rem">Hali ma`lumot yoq</p>';
+  }});
+}}
+function deleteAIItem(id){{
+  fetch('/api/ai/knowledge/'+id,{{method:'DELETE',headers:{{'X-CSRF-Token':'{get_csrf_token()}'}}}}).then(()=>loadAIKnowledge());
+}}
 </script>
 </body></html>"""
 
@@ -4685,6 +4815,121 @@ def _simple_md_to_html(text):
         html_lines.append("</pre></code>")
     return "\n".join(html_lines)
 
+
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║         OFFLINE AI YORDAMCHI — mahalliy fayllar asosida ishlaydi         ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+AI_DATA_DIR = Path("ai_data")
+AI_DATA_DIR.mkdir(exist_ok=True)
+AI_KNOWLEDGE_FILE = AI_DATA_DIR / "knowledge.json"
+
+def _load_ai_knowledge():
+    """ai_data/knowledge.json dan ma'lumotlarni yuklaydi."""
+    if not AI_KNOWLEDGE_FILE.exists():
+        return []
+    try:
+        with open(AI_KNOWLEDGE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+def _save_ai_knowledge(data):
+    """Ma'lumotlarni ai_data/knowledge.json ga saqlaydi."""
+    with open(AI_KNOWLEDGE_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def _ai_find_answer(question):
+    """Savol uchun eng yaxshi javobni topadi (kalit so'z moslik asosida)."""
+    knowledge = _load_ai_knowledge()
+    if not knowledge:
+        return "Hali men hech narsa bilmayman. Iltimos, avval meni o'rgating (📚 O'qitish tugmasi)."
+    q_lower = question.lower().strip()
+    q_words = set(re.findall(r'\w+', q_lower))
+    best_score = 0
+    best_answer = None
+    for item in knowledge:
+        item_q = item.get("question", "").lower()
+        item_words = set(re.findall(r'\w+', item_q))
+        # Kalit so'z kategoriya qo'shish
+        if item.get("category"):
+            item_words.update(re.findall(r'\w+', item["category"].lower()))
+        # To'g'ridan-to'g'ri moslik
+        if q_lower in item_q or item_q in q_lower:
+            return item["answer"]
+        # So'z moslik hisoblash
+        common = q_words & item_words
+        if common:
+            score = len(common) / max(len(q_words), 1) * 100
+            # Uzun so'zlar uchun bonus
+            score += sum(2 for w in common if len(w) > 3)
+            if score > best_score:
+                best_score = score
+                best_answer = item["answer"]
+    if best_score >= 25 and best_answer:
+        return best_answer
+    # Umumiy javoblar
+    greetings = {"salom", "hey", "hi", "assalomu", "hello"}
+    if q_words & greetings:
+        return "Salom! Men AI yordamchiman. Sizga qanday yordam bera olaman?"
+    thanks = {"rahmat", "raxmat", "thanks", "thank"}
+    if q_words & thanks:
+        return "Arzimaydi! Yana savollaringiz bo'lsa, bemalol so'rang."
+    return f"Bu savolga javob topilmadi. Iltimos, 📚 O'qitish tugmasi orqali menga yangi ma'lumot bering.\n\nSiz so'radingiz: \"{question}\""
+
+@app.route("/api/ai/ask", methods=["POST"])
+@user_req
+def api_ai_ask():
+    d = request.get_json() or {}
+    question = (d.get("question") or "").strip()
+    if not question:
+        return jsonify({"answer": "Savol bo'sh"})
+    answer = _ai_find_answer(question)
+    # Log saqlash
+    log_file = AI_DATA_DIR / "chat_log.jsonl"
+    try:
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"q": question, "a": answer[:100], "user": session.get("username", ""),
+                                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+    return jsonify({"answer": answer})
+
+@app.route("/api/ai/train", methods=["POST"])
+@user_req
+def api_ai_train():
+    d = request.get_json() or {}
+    question = (d.get("question") or "").strip()
+    answer = (d.get("answer") or "").strip()
+    category = (d.get("category") or "").strip()
+    if not question or not answer:
+        return jsonify({"ok": False, "error": "Savol va javob majburiy"})
+    knowledge = _load_ai_knowledge()
+    new_id = max([item.get("id", 0) for item in knowledge], default=0) + 1
+    knowledge.append({
+        "id": new_id,
+        "question": question,
+        "answer": answer,
+        "category": category,
+        "added_by": session.get("username", ""),
+        "added_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    })
+    _save_ai_knowledge(knowledge)
+    audit("ai_train", "knowledge", new_id, question[:80])
+    return jsonify({"ok": True, "id": new_id})
+
+@app.route("/api/ai/knowledge")
+@user_req
+def api_ai_knowledge():
+    knowledge = _load_ai_knowledge()
+    return jsonify({"items": knowledge})
+
+@app.route("/api/ai/knowledge/<int:kid>", methods=["DELETE"])
+@user_req
+def api_ai_knowledge_delete(kid):
+    knowledge = _load_ai_knowledge()
+    knowledge = [item for item in knowledge if item.get("id") != kid]
+    _save_ai_knowledge(knowledge)
+    return jsonify({"ok": True})
 
 
 # ── Terminal / Shell (xterm.js uchun backend) ──────────────────────────────
