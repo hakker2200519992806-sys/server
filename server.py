@@ -912,6 +912,8 @@ function copyText(t){{navigator.clipboard.writeText(t).then(()=>{{
     <input type="text" id="aiInput" placeholder="Savol yozing..."
       style="flex:1;padding:8px 12px;background:#0d0f18;border:1px solid #252d45;border-radius:8px;
       color:#d4daf0;font-size:.82rem;outline:none" onkeydown="if(event.key==='Enter')askAI()">
+    <button onclick="speakLastAI()" title="Ovozli o'qish" style="background:transparent;border:1px solid #252d45;color:#5c6890;
+      border-radius:8px;padding:8px;font-size:.9rem;cursor:pointer">🔊</button>
     <button onclick="askAI()" style="background:#7c6fff;color:#fff;border:none;border-radius:8px;
       padding:8px 14px;font-size:.8rem;cursor:pointer;font-weight:600">↑</button>
   </div>
@@ -1038,6 +1040,11 @@ function showAITutorial(){{
     +'• **Emmet:** "div*10 nima", "ul>li*5", "emmet"\\n'
     +'• **Matematik:** 2+2, 100/4, (5+3)*2\\n'
     +'• **O\\'yin:** tosh, qaychi, qogoz, latifa, son ber\\n'
+    +'• **Son topish:** "son top" (1-100 topishmoq)\\n'
+    +'• **Lorem:** "lorem 50" (placeholder matn)\\n'
+    +'• **Vaqt:** "soat nechchi", "bugun nechanchi"\\n'
+    +'• **Eslatma:** "5 daqiqadan keyin eslatib tur"\\n'
+    +'• **Loyiha:** "nechta fayl", "loyihalarim"\\n'
     +'• **Xotira:** "oldin nima dedim", "esla", "tarix"\\n'
     +'• **Haqida:** "sen kim", "isming nima", "nima qila olasan"\\n\\n'
     +'---\\n'
@@ -1047,6 +1054,14 @@ function showAITutorial(){{
     +'• Javobda formatlash ishlatish mumkin\\n'
     +'• Javobda `<img src="url">` bilan rasm qo\\'shish mumkin\\n'
     +'• 🚫 Filtr tabida haqoratli so\\'zlarni boshqaring\\n\\n'
+    +'---\\n'
+    +'==YANGI FUNKSIYALAR:==\\n'
+    +'• 📐 **Lorem:** "lorem 50" — 50 so\\'zlik placeholder matn\\n'
+    +'• 🎯 **Son topish:** "son top" — 1-100 orasida topishmoq\\n'
+    +'• 📁 **Loyiha:** "nechta fayl", "loyihalarim" — fayl haqida\\n'
+    +'• ⏰ **Eslatma:** "5 daqiqadan keyin eslatib tur" — timer\\n'
+    +'• 🔊 **Ovozli:** 🔊 tugmasini bosing — AI javobini o\\'qiydi\\n'
+    +'• 🕐 **Vaqt:** "soat nechchi", "bugun nechanchi"\\n\\n'
     +'---\\n'
     +'@@Omadli foydalanish!@@ 🚀';
   var msgs=document.getElementById('aiMessages');
@@ -1083,11 +1098,43 @@ function askAI(){{
   fetch('/api/ai/ask',{{method:'POST',headers:{{'Content-Type':'application/json','X-CSRF-Token':'{get_csrf_token()}'}},
     body:JSON.stringify({{question:q}})}}).then(r=>r.json()).then(d=>{{
     var msgs=document.getElementById('aiMessages');
-    msgs.lastChild.innerHTML=formatAIMsg(d.answer||'Javob topilmadi');
+    var answer=d.answer||'Javob topilmadi';
+    // Timer tekshiruvi
+    var timerMatch=answer.match(/\|\|TIMER:(\d+)\|\|/);
+    if(timerMatch){{
+      var ms=parseInt(timerMatch[1]);
+      answer=answer.replace(/\|\|TIMER:\d+\|\|/,'');
+      setTimeout(function(){{
+        if(Notification.permission==='granted'){{new Notification('⏰ AI Eslatma',{{body:'Vaqt tugadi!'}});}}
+        else{{alert('⏰ Eslatma: Vaqt tugadi!');}}
+        addAIMsg('⏰ **Eslatma!** Siz belgilagan vaqt tugadi!','ai');
+      }},ms);
+      if(Notification.permission==='default')Notification.requestPermission();
+    }}
+    msgs.lastChild.innerHTML=formatAIMsg(answer);
+    window._lastAIAnswer=answer;
   }}).catch(()=>{{
     var msgs=document.getElementById('aiMessages');
     msgs.lastChild.innerHTML='<span style="color:#f05d5d">Xato yuz berdi</span>';
   }});
+}}
+// ── Ovozli o'qish (TTS) ──
+var _ttsEnabled=localStorage.getItem('ai_tts')==='1';
+function speakLastAI(){{
+  var text=window._lastAIAnswer||'';
+  if(!text){{alert('Avval savol bering');return;}}
+  // HTML teglarni tozalash
+  var clean=text.replace(/<[^>]+>/g,'').replace(/\*\*/g,'').replace(/[=!@#~_`|]/g,'').replace(/\\n/g,' ');
+  if(!('speechSynthesis' in window)){{alert('Brauzeringiz ovozli o\\'qishni qo\\'llab-quvvatlamaydi');return;}}
+  window.speechSynthesis.cancel();
+  var utter=new SpeechSynthesisUtterance(clean);
+  utter.lang='uz';utter.rate=0.9;utter.pitch=1;
+  // O'zbek tili topilmasa ingliz yoki rus
+  var voices=window.speechSynthesis.getVoices();
+  var uzVoice=voices.find(function(v){{return v.lang.startsWith('uz');}});
+  if(uzVoice) utter.voice=uzVoice;
+  else{{var ruVoice=voices.find(function(v){{return v.lang.startsWith('ru');}});if(ruVoice)utter.voice=ruVoice;}}
+  window.speechSynthesis.speak(utter);
 }}
 function addAIMsg(text,role){{
   var msgs=document.getElementById('aiMessages');
@@ -5329,10 +5376,63 @@ def _ai_solve_math(text):
     return None
 
 def _ai_play_game(text):
-    """Oddiy o'yinlar."""
+    """Oddiy o'yinlar va amaliy vositalar."""
     import random
     t = text.lower().strip()
-    # Tosh-qaychi-qog'oz
+
+    # ── Lorem generatori ──
+    lorem_match = re.search(r'lorem\s*(\d+)?', t)
+    if lorem_match and ("lorem" in t):
+        n = int(lorem_match.group(1) or 30)
+        words = ('lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor '
+                 'incididunt ut labore et dolore magna aliqua ut enim ad minim veniam quis nostrud '
+                 'exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat duis aute '
+                 'irure dolor in reprehenderit voluptate velit esse cillum dolore eu fugiat nulla '
+                 'pariatur excepteur sint occaecat cupidatat non proident sunt culpa qui officia '
+                 'deserunt mollit anim id est laborum').split()
+        result = ' '.join(words[i % len(words)] for i in range(n))
+        result = result[0].upper() + result[1:] + '.'
+        return f"📐 **Lorem ({n} so'z):**\n\n{result}"
+
+    # ── Son topish o'yini ──
+    if re.search(r'son\s*top|topishmoq.*son|son.*o.?yin', t):
+        n = random.randint(1, 100)
+        # Saqlaymiz session ga (keyingi xabarlarda tekshirish uchun)
+        hints = []
+        if n < 50: hints.append("50 dan kichik")
+        else: hints.append("50 dan katta")
+        if n % 2 == 0: hints.append("juft son")
+        else: hints.append("toq son")
+        return f"🎯 **Son topish o'yini!**\n\nMen 1 dan 100 gacha son o'yladim.\n\n💡 Maslahat: {hints[0]}, {hints[1]}.\n\nJavobingizni yozing! (To'g'ri javob: ||{n}||)"
+
+    # ── Eslatma / Timer ──
+    reminder_match = re.search(r'(\d+)\s*(daqiqa|minut|min|sekund|sek|sec|soat)', t)
+    if reminder_match and any(w in t for w in ["eslat", "timer", "vaqt", "bildir", "ogohlantir"]):
+        amount = int(reminder_match.group(1))
+        unit = reminder_match.group(2)
+        if "sek" in unit or "sec" in unit:
+            ms = amount * 1000
+            unit_name = "sekund"
+        elif "soat" in unit:
+            ms = amount * 3600000
+            unit_name = "soat"
+        else:
+            ms = amount * 60000
+            unit_name = "daqiqa"
+        return f"⏰ **Eslatma qo'yildi!**\n\n{amount} {unit_name} dan keyin bildirishnoma keladi.\n\n||TIMER:{ms}||"
+
+    # ── Vaqt/sana ──
+    if any(w in t for w in ["soat", "vaqt", "nechanchi", "bugun", "sana", "kun"]):
+        if any(w in t for w in ["soat", "vaqt", "nech"]):
+            now = datetime.now()
+            return f"🕐 Hozir: **{now.strftime('%H:%M:%S')}**\n📅 Sana: **{now.strftime('%Y-%m-%d')}** ({['Dushanba','Seshanba','Chorshanba','Payshanba','Juma','Shanba','Yakshanba'][now.weekday()]})"
+        if any(w in t for w in ["bugun", "sana", "nechanchi", "kun"]):
+            now = datetime.now()
+            kunlar = ['Dushanba','Seshanba','Chorshanba','Payshanba','Juma','Shanba','Yakshanba']
+            oylar = ['Yanvar','Fevral','Mart','Aprel','May','Iyun','Iyul','Avgust','Sentyabr','Oktyabr','Noyabr','Dekabr']
+            return f"📅 Bugun: **{now.day}-{oylar[now.month-1]}, {now.year}-yil** ({kunlar[now.weekday()]})"
+
+    # ── Tosh-qaychi-qog'oz ──
     if any(w in t for w in ["tosh", "qaychi", "qogoz", "qog'oz", "kagoz"]):
         choices = ["tosh", "qaychi", "qogoz"]
         user_choice = None
@@ -5349,15 +5449,18 @@ def _ai_play_game(text):
                 return f"Men: {emoji[ai_choice]} {ai_choice}\nSiz: {emoji[user_choice]} {user_choice}\n\n🎉 Siz yutdingiz!"
             else:
                 return f"Men: {emoji[ai_choice]} {ai_choice}\nSiz: {emoji[user_choice]} {user_choice}\n\n😎 Men yutdim!"
-        return "Tosh-qaychi-qogoz o'ynaylikmi? 'tosh', 'qaychi' yoki 'qogoz' yozing!"
-    # Son topish o'yini
+        return "Tosh-qaychi-qogoz: 'tosh', 'qaychi' yoki 'qogoz' yozing!"
+
+    # ── O'yinlar ro'yxati ──
     if any(w in t for w in ["oyin", "o'yin", "oyna", "game", "zerik"]):
-        return "🎮 O'yinlar:\n• Tosh-qaychi-qogoz: 'tosh', 'qaychi' yoki 'qogoz' yozing\n• Matematik: '2+2', '15*3', '100/4' kabi misol yozing\n• Tasodifiy son: 'son ber' yozing (1-100)\n• Latifa: 'latifa' yozing"
-    # Tasodifiy son
-    if "son" in t and ("ber" in t or "ayt" in t or "tanlа" in t):
+        return "🎮 **O'yinlar va vositalar:**\n\n• 🪨 Tosh-qaychi-qogoz: 'tosh', 'qaychi', 'qogoz'\n• 🎯 Son topish: 'son top'\n• 🧮 Matematik: '2+2', '15*3', '(5+3)*2'\n• 🎲 Tasodifiy son: 'son ber'\n• 😂 Latifa: 'latifa'\n• 📐 Lorem: 'lorem 50'\n• 🕐 Vaqt: 'soat nechchi', 'bugun'\n• ⏰ Eslatma: '5 daqiqadan keyin eslatib tur'"
+
+    # ── Tasodifiy son ──
+    if "son" in t and ("ber" in t or "ayt" in t):
         n = random.randint(1, 100)
         return f"🎲 Tasodifiy son: **{n}**"
-    # Latifa
+
+    # ── Latifa ──
     if any(w in t for w in ["latifa", "hazil", "kul", "anekdot"]):
         jokes = [
             "Dasturchi nega yomg'irni yaxshi ko'radi? Chunki bug (xato) lar yo'qoladi! 😄",
@@ -5365,8 +5468,29 @@ def _ai_play_game(text):
             "Dasturchi turmushga chiqdi... catch blokida 💍",
             "Wi-Fi parolni bilasizmi?\n— Ha, devorga yozilgan.\n— 12345678mi?\n— Yo'q, 'devorga_yozilgan' 😂",
             "Nechta dasturchi lampochka almashtirishi kerak? Hech biri — bu hardware muammo! 💡",
+            "404: Latifa topilmadi... 😜 Hazil, mana:\nHTML ni CSS siz ko'rganmisiz? Yalang'och! 🙈",
         ]
         return random.choice(jokes)
+
+    return None
+
+# ── Loyiha yordamchisi ────────────────────────────────────────────────────
+def _ai_project_helper(q_lower, name):
+    """Loyiha fayllari haqida ma'lumot beradi."""
+    if not any(w in q_lower for w in ["loyiha", "fayl", "project", "papka", "index", "nechta"]):
+        return None
+    # Foydalanuvchining loyihalari
+    uid = session.get("user_id", 0)
+    if any(w in q_lower for w in ["nechta fayl", "fayl soni", "fayllar"]):
+        projs = db_exec("SELECT p.name,p.uuid,(SELECT COUNT(*) FROM project_files WHERE project_id=p.id) as cnt FROM projects p WHERE p.owner_id=? ORDER BY p.updated_at DESC LIMIT 5", (uid,)) or []
+        if not projs:
+            return f"{name}, sizda hali loyiha yo'q. /projects sahifasidan yangi loyiha yarating!"
+        lines = "\n".join([f"• **{p['name']}** — {p['cnt']} ta fayl" for p in projs])
+        return f"📁 **Sizning loyihalaringiz:**\n\n{lines}"
+    if any(w in q_lower for w in ["loyiha", "project", "nechta loyiha"]):
+        cnt = q1("SELECT COUNT(*) c FROM projects WHERE owner_id=?", (uid,))
+        total = cnt["c"] if cnt else 0
+        return f"📁 {name}, sizda jami **{total}** ta loyiha bor.\n\n'nechta fayl' deb so'rang — har bir loyihadagi fayllar sonini ko'rsataman."
     return None
 
 def _ai_find_answer(question, username="", history=None):
@@ -5398,6 +5522,11 @@ def _ai_find_answer(question, username="", history=None):
     game_result = _ai_play_game(question)
     if game_result is not None:
         return game_result
+
+    # ── Loyiha yordamchisi ──
+    proj_result = _ai_project_helper(q_lower, name)
+    if proj_result:
+        return proj_result
 
     # ── AI o'zi haqida ──
     ai_about_patterns = [
