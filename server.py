@@ -901,6 +901,11 @@ function copyText(t){{navigator.clipboard.writeText(t).then(()=>{{
     <span style="font-size:1.1rem;margin-left:4px">🤖</span>
     <b style="color:#fff;font-size:.85rem;flex:1">AI Yordamchi</b>
   </div>
+  <div style="padding:4px 12px;display:flex;gap:4px;border-bottom:1px solid #1c2136;flex-shrink:0">
+    <button onclick="loadAIChatHistory()" style="background:transparent;border:1px solid #252d45;color:#5c6890;border-radius:4px;padding:2px 6px;font-size:.65rem;cursor:pointer">📜 Tarix</button>
+    <button onclick="clearAIChat()" style="background:transparent;border:1px solid #252d45;color:#5c6890;border-radius:4px;padding:2px 6px;font-size:.65rem;cursor:pointer">🗑 Tozalash</button>
+    <button onclick="sendAIImage()" style="background:transparent;border:1px solid #252d45;color:#5c6890;border-radius:4px;padding:2px 6px;font-size:.65rem;cursor:pointer">🖼 Rasm</button>
+  </div>
   <div id="aiMessages" style="flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px"></div>
   <div style="padding:8px 12px;border-top:1px solid #252d45;display:flex;gap:6px;flex-shrink:0">
     <input type="text" id="aiInput" placeholder="Savol yozing..."
@@ -934,8 +939,8 @@ function copyText(t){{navigator.clipboard.writeText(t).then(()=>{{
         <div style="margin-bottom:8px"><label style="color:#5c6890;font-size:.74rem">Savol / kalit so'z:</label>
           <input type="text" id="aiTrainQ" placeholder="Masalan: server qanday ishga tushadi?"
             style="width:100%;padding:7px;background:#0d0f18;border:1px solid #252d45;border-radius:6px;color:#d4daf0;margin-top:3px;font-size:.82rem"></div>
-        <div style="margin-bottom:8px"><label style="color:#5c6890;font-size:.74rem">Javob:</label>
-          <textarea id="aiTrainA" rows="3" placeholder="python server.py buyrug'ini terminada yozing..."
+        <div style="margin-bottom:8px"><label style="color:#5c6890;font-size:.74rem">Javob (HTML, rasm uchun &lt;img src="url"&gt; ishlatish mumkin):</label>
+          <textarea id="aiTrainA" rows="3" placeholder="Javob matni... Rasm uchun: <img src=&quot;https://...&quot;>"
             style="width:100%;padding:7px;background:#0d0f18;border:1px solid #252d45;border-radius:6px;color:#d4daf0;margin-top:3px;resize:vertical;font-size:.82rem"></textarea></div>
         <button onclick="trainAI('qa')" style="background:#7c6fff;color:#fff;border:none;border-radius:7px;padding:7px 14px;cursor:pointer;font-weight:600;font-size:.8rem">💾 Saqlash</button>
       </div>
@@ -966,9 +971,42 @@ var aiWindowEl=null,aiDragging=false,aiDragX=0,aiDragY=0,aiStartX=0,aiStartY=0;
 function toggleAIWindow(){{
   var w=document.getElementById('aiWindow');
   if(w.style.display==='flex'){{w.style.display='none';}}
-  else{{w.style.display='flex';document.getElementById('aiInput').focus();}}
+  else{{w.style.display='flex';document.getElementById('aiInput').focus();loadAIChatHistory();}}
 }}
 function closeAIWindow(){{document.getElementById('aiWindow').style.display='none';}}
+function loadAIChatHistory(){{
+  fetch('/api/ai/history',{{headers:{{'X-CSRF-Token':'{get_csrf_token()}'}}}}).then(r=>r.json()).then(d=>{{
+    var msgs=document.getElementById('aiMessages');
+    msgs.innerHTML='';
+    (d.history||[]).slice(-20).forEach(function(m){{
+      addAIMsg(m.q,'user');
+      addAIMsg(m.a,'ai');
+    }});
+    if(!(d.history||[]).length) addAIMsg('Salom! Men AI yordamchiman. 🤖 Sizga qanday yordam bera olaman?','ai');
+    msgs.scrollTop=msgs.scrollHeight;
+  }}).catch(function(){{
+    addAIMsg('Salom! Men AI yordamchiman. 🤖 Sizga qanday yordam bera olaman?','ai');
+  }});
+}}
+function clearAIChat(){{
+  if(!confirm('Suhbat tarixini tozalashni xohlaysizmi?')) return;
+  fetch('/api/ai/history/clear',{{method:'POST',headers:{{'X-CSRF-Token':'{get_csrf_token()}'}}}}).then(function(){{
+    document.getElementById('aiMessages').innerHTML='';
+    addAIMsg('Suhbat tozalandi. Yangi suhbat boshlaymiz! 🤖','ai');
+  }});
+}}
+function sendAIImage(){{
+  var url=prompt('Rasm URL manzilini kiriting:');
+  if(!url) return;
+  var msgs=document.getElementById('aiMessages');
+  var div=document.createElement('div');
+  div.style.cssText='align-self:flex-end;max-width:85%';
+  div.innerHTML='<img src="'+url+'" style="max-width:100%;border-radius:8px;border:1px solid #252d45">';
+  msgs.appendChild(div);
+  msgs.scrollTop=msgs.scrollHeight;
+  // AI ga rasm haqida xabar
+  addAIMsg('🖼 Rasm qabul qilindi! Chiroyli rasm.','ai');
+}}
 function openAITrainPanel(){{document.getElementById('aiTrainBg').style.display='flex';loadAIKnowledge();}}
 function closeAITrain(){{document.getElementById('aiTrainBg').style.display='none';}}
 (function(){{
@@ -1013,7 +1051,19 @@ function addAIMsg(text,role){{
   msgs.appendChild(div);
   msgs.scrollTop=msgs.scrollHeight;
 }}
-function formatAIMsg(t){{return t.replace(/\\n/g,'<br>').replace(/`([^`]+)`/g,'<code style="background:#252d45;padding:1px 4px;border-radius:3px">$1</code>');}}
+function formatAIMsg(t){{
+  // Rasmlarni saqlash
+  t=t.replace(/<img\s+([^>]*)>/gi,'<img $1 style="max-width:100%;border-radius:6px;margin:4px 0">');
+  // **bold**
+  t=t.replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>');
+  // `code`
+  t=t.replace(/`([^`]+)`/g,'<code style="background:#252d45;padding:1px 4px;border-radius:3px">$1</code>');
+  // yangi qator
+  t=t.replace(/\\n/g,'<br>');
+  // bullet points
+  t=t.replace(/• /g,'<span style="color:var(--ac)">•</span> ');
+  return t;
+}}
 function trainAI(type){{
   var payload={{}};
   if(type==='badword'){{
@@ -5249,12 +5299,25 @@ def _ai_play_game(text):
         return random.choice(jokes)
     return None
 
-def _ai_find_answer(question, username=""):
+def _ai_find_answer(question, username="", history=None):
     """Savol uchun eng yaxshi javobni topadi."""
     q_lower = question.lower().strip()
     q_words = set(re.findall(r'\w+', q_lower))
     question_words = _load_question_words()
     name = username or "foydalanuvchi"
+    hist = history or []
+
+    # ── Oldingi suhbatga murojat ──
+    memory_patterns = [r"oldin\s*(nima|nim)", r"avval\s*(nima|nim)", r"esla",
+                       r"birinchi\s*savol", r"oxirgi\s*savol", r"nima\s*degan\s*edim",
+                       r"nima\s*so.?ragan", r"tarix"]
+    for pat in memory_patterns:
+        if re.search(pat, q_lower):
+            if not hist:
+                return f"Hali suhbatimiz boshlanmagan, {name}. Menga biror narsa so'rang! 😊"
+            last_msgs = hist[-5:]
+            memory_text = "\n".join([f"• Siz: {m['q']}\n  Men: {m['a'][:80]}..." for m in last_msgs])
+            return f"📝 So'nggi suhbatimiz, {name}:\n\n{memory_text}\n\n(Jami {len(hist)} ta xabar saqlangan)"
 
     # ── Matematik amallar ──
     math_result = _ai_solve_math(question)
@@ -5390,6 +5453,36 @@ def _ai_find_answer(question, username=""):
 
     return f"Hmm, {name}, bu savolga hozircha javobim yo'q. 🤔\n\n💡 Quyidagi mavzularda suhbatlashishimiz mumkin:\n• 🌐 HTML: \"div nima\", \"img tegi\", \"table qanday\"\n• 🎨 CSS: \"flexbox nima\", \"margin padding\", \"display\"\n• ✨ Emmet: \"div*10 nima\", \"ul>li*5\", \"emmet nima\"\n• 🧮 Matematik: 2+2, 100/4, (5+3)*2\n• 🎮 O'yin: tosh, latifa, son ber\n\n📚 Yoki O'qitish tugmasi orqali menga yangi bilim bering!"
 
+# ── Suhbat tarixi (har foydalanuvchi uchun alohida) ───────────────────────
+def _load_chat_history(user_id):
+    """Foydalanuvchining suhbat tarixini yuklaydi."""
+    hist_file = AI_DATA_DIR / f"history_{user_id}.json"
+    if not hist_file.exists():
+        return []
+    try:
+        with open(hist_file, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+def _save_chat_message(user_id, username, question, answer):
+    """Yangi xabarni suhbat tarixiga qo'shadi."""
+    hist_file = AI_DATA_DIR / f"history_{user_id}.json"
+    history = _load_chat_history(user_id)
+    history.append({
+        "q": question,
+        "a": answer[:1000],
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    })
+    # Maksimal 200 ta xabar saqlash
+    if len(history) > 200:
+        history = history[-200:]
+    try:
+        with open(hist_file, "w", encoding="utf-8") as f:
+            json.dump(history, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
 # ── API endpointlari ──────────────────────────────────────────────────────
 @app.route("/api/ai/ask", methods=["POST"])
 @user_req
@@ -5405,16 +5498,31 @@ def api_ai_ask():
             return jsonify({"answer": custom_resp})
         return jsonify({"answer": "⚠️ Iltimos, hurmatli muloqot qiling."})
     username = session.get("username", "")
-    answer = _ai_find_answer(question, username)
-    # Log saqlash
-    log_file = AI_DATA_DIR / "chat_log.jsonl"
-    try:
-        with open(log_file, "a", encoding="utf-8") as f:
-            f.write(json.dumps({"q": question, "a": answer[:200], "user": username,
-                                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
+    user_id = session.get("user_id", 0)
+    # Suhbat tarixini yuklash
+    history = _load_chat_history(user_id)
+    answer = _ai_find_answer(question, username, history)
+    # Suhbatni saqlash
+    _save_chat_message(user_id, username, question, answer)
     return jsonify({"answer": answer})
+
+@app.route("/api/ai/history")
+@user_req
+def api_ai_history():
+    """Foydalanuvchining suhbat tarixini qaytaradi."""
+    user_id = session.get("user_id", 0)
+    history = _load_chat_history(user_id)
+    return jsonify({"history": history[-50:]})  # oxirgi 50 ta
+
+@app.route("/api/ai/history/clear", methods=["POST"])
+@user_req
+def api_ai_history_clear():
+    """Suhbat tarixini tozalash."""
+    user_id = session.get("user_id", 0)
+    hist_file = AI_DATA_DIR / f"history_{user_id}.json"
+    if hist_file.exists():
+        hist_file.unlink()
+    return jsonify({"ok": True})
 
 @app.route("/api/ai/train", methods=["POST"])
 @user_req
