@@ -894,12 +894,12 @@ function copyText(t){{navigator.clipboard.writeText(t).then(()=>{{
   z-index:999999;display:none;flex-direction:column;overflow:hidden;min-width:260px;min-height:200px;resize:both;font-size:14px">
   <div id="aiHeader" style="padding:10px 14px;background:#1c2136;border-bottom:1px solid #252d45;
     cursor:move;display:flex;align-items:center;gap:8px;flex-shrink:0;user-select:none">
-    <span style="font-size:1.1rem">🤖</span>
-    <b style="color:#fff;font-size:.85rem;flex:1">AI Yordamchi</b>
     <button onclick="openAITrainPanel()" style="background:transparent;border:1px solid #252d45;color:#7c6fff;
       border-radius:5px;padding:3px 8px;font-size:.7rem;cursor:pointer" title="AI ni o'qitish">📚 O'qitish</button>
     <button onclick="closeAIWindow()" style="background:transparent;border:1px solid #252d45;color:#f05d5d;
       border-radius:5px;padding:3px 8px;font-size:.75rem;cursor:pointer;font-weight:700">✕</button>
+    <span style="font-size:1.1rem;margin-left:4px">🤖</span>
+    <b style="color:#fff;font-size:.85rem;flex:1">AI Yordamchi</b>
   </div>
   <div id="aiMessages" style="flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px"></div>
   <div style="padding:8px 12px;border-top:1px solid #252d45;display:flex;gap:6px;flex-shrink:0">
@@ -925,10 +925,11 @@ function copyText(t){{navigator.clipboard.writeText(t).then(()=>{{
       <p style="color:#5c6890;font-size:.79rem;margin-bottom:12px">AI ni 3 xil usulda o'rgating.
         Barcha ma'lumotlar <code>ai_data/</code> papkasida saqlanadi.</p>
       <!-- TAB BUTTONS -->
-      <div style="display:flex;gap:4px;margin-bottom:12px">
-        <button onclick="showAITab('qa')" id="aiTabQA" style="flex:1;padding:6px;background:#7c6fff;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:.76rem;font-weight:600">📝 Savol-Javob</button>
-        <button onclick="showAITab('topic')" id="aiTabTopic" style="flex:1;padding:6px;background:#252d45;color:#5c6890;border:none;border-radius:6px;cursor:pointer;font-size:.76rem">📚 Mavzu+Ma'lumot</button>
-        <button onclick="showAITab('word')" id="aiTabWord" style="flex:1;padding:6px;background:#252d45;color:#5c6890;border:none;border-radius:6px;cursor:pointer;font-size:.76rem">🔤 Savol so'zi</button>
+      <div style="display:flex;gap:4px;margin-bottom:12px;flex-wrap:wrap">
+        <button onclick="showAITab('qa')" id="aiTabQA" style="flex:1;padding:6px;background:#7c6fff;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:.72rem;font-weight:600">📝 Savol-Javob</button>
+        <button onclick="showAITab('topic')" id="aiTabTOPIC" style="flex:1;padding:6px;background:#252d45;color:#5c6890;border:none;border-radius:6px;cursor:pointer;font-size:.72rem">📚 Mavzu</button>
+        <button onclick="showAITab('word')" id="aiTabWORD" style="flex:1;padding:6px;background:#252d45;color:#5c6890;border:none;border-radius:6px;cursor:pointer;font-size:.72rem">🔤 So'z</button>
+        <button onclick="showAITab('badword')" id="aiTabBADWORD" style="flex:1;padding:6px;background:#252d45;color:#5c6890;border:none;border-radius:6px;cursor:pointer;font-size:.72rem">🚫 Filtr</button>
       </div>
       <!-- QA TAB -->
       <div id="aiPanelQA">
@@ -963,6 +964,18 @@ function copyText(t){{navigator.clipboard.writeText(t).then(()=>{{
           <button onclick="trainAI('word')" style="background:#f5c518;color:#000;border:none;border-radius:7px;padding:7px 12px;cursor:pointer;font-weight:600;font-size:.8rem">+ Qo'shish</button>
         </div>
         <div id="aiWordsList" style="display:flex;flex-wrap:wrap;gap:4px"></div>
+      </div>
+      <!-- BADWORD TAB -->
+      <div id="aiPanelBadword" style="display:none">
+        <p style="color:#5c6890;font-size:.74rem;margin-bottom:8px">Haqoratli so'zlarni qo'shing. Foydalanuvchi bu so'zlarni ishlatsa, siz belgilagan javob yuboriladi.</p>
+        <div style="margin-bottom:8px"><label style="color:#5c6890;font-size:.74rem">Haqoratli so'z:</label>
+          <input type="text" id="aiBadWord" placeholder="Masalan: axmoq"
+            style="width:100%;padding:7px;background:#0d0f18;border:1px solid #252d45;border-radius:6px;color:#d4daf0;margin-top:3px;font-size:.82rem"></div>
+        <div style="margin-bottom:8px"><label style="color:#5c6890;font-size:.74rem">Javob (bu so'z ishlatilganda nima deyilsin):</label>
+          <input type="text" id="aiBadResp" placeholder="Masalan: Iltimos, hurmatli muloqot qiling!"
+            style="width:100%;padding:7px;background:#0d0f18;border:1px solid #252d45;border-radius:6px;color:#d4daf0;margin-top:3px;font-size:.82rem"></div>
+        <button onclick="trainAI('badword')" style="background:#f05d5d;color:#fff;border:none;border-radius:7px;padding:7px 14px;cursor:pointer;font-weight:600;font-size:.8rem">🚫 Qo'shish</button>
+        <div id="aiBadList" style="display:flex;flex-wrap:wrap;gap:4px;margin-top:8px"></div>
       </div>
       <button onclick="loadAIKnowledge()" style="background:transparent;border:1px solid #252d45;color:#5c6890;border-radius:7px;
         padding:6px 12px;cursor:pointer;font-size:.78rem;margin-top:10px">🔄 Yangilash</button>
@@ -1025,7 +1038,12 @@ function addAIMsg(text,role){{
 function formatAIMsg(t){{return t.replace(/\\n/g,'<br>').replace(/`([^`]+)`/g,'<code style="background:#252d45;padding:1px 4px;border-radius:3px">$1</code>');}}
 function trainAI(type){{
   var payload={{}};
-  if(type==='word'){{
+  if(type==='badword'){{
+    var w=document.getElementById('aiBadWord').value.trim();
+    var r=document.getElementById('aiBadResp').value.trim();
+    if(!w&&!r){{alert('So\\'z yoki javob kiriting');return;}}
+    payload={{type:'badword',word:w,response:r}};
+  }}else if(type==='word'){{
     var w=document.getElementById('aiNewWord').value.trim();
     if(!w){{alert('So\\'z kiriting');return;}}
     payload={{type:'word',word:w}};
@@ -1044,7 +1062,8 @@ function trainAI(type){{
   fetch('/api/ai/train',{{method:'POST',headers:{{'Content-Type':'application/json','X-CSRF-Token':'{get_csrf_token()}'}},
     body:JSON.stringify(payload)}}).then(r=>r.json()).then(d=>{{
     if(d.ok){{
-      if(type==='word')document.getElementById('aiNewWord').value='';
+      if(type==='badword'){{document.getElementById('aiBadWord').value='';}}
+      else if(type==='word')document.getElementById('aiNewWord').value='';
       else if(type==='topic'){{document.getElementById('aiTopicName').value='';document.getElementById('aiTopicInfo').value='';}}
       else{{document.getElementById('aiTrainQ').value='';document.getElementById('aiTrainA').value='';document.getElementById('aiTrainCat').value='';}}
       loadAIKnowledge();alert('✓ Saqlandi!');
@@ -1052,10 +1071,11 @@ function trainAI(type){{
   }});
 }}
 function showAITab(tab){{
-  ['qa','topic','word'].forEach(function(t){{
-    document.getElementById('aiPanel'+t.charAt(0).toUpperCase()+t.slice(1)).style.display=t===tab?'block':'none';
-    document.getElementById('aiTab'+t.toUpperCase()).style.background=t===tab?'#7c6fff':'#252d45';
-    document.getElementById('aiTab'+t.toUpperCase()).style.color=t===tab?'#fff':'#5c6890';
+  ['qa','topic','word','badword'].forEach(function(t){{
+    var panel=document.getElementById('aiPanel'+t.charAt(0).toUpperCase()+t.slice(1));
+    if(panel) panel.style.display=t===tab?'block':'none';
+    var btn=document.getElementById('aiTab'+t.toUpperCase());
+    if(btn){{btn.style.background=t===tab?'#7c6fff':'#252d45';btn.style.color=t===tab?'#fff':'#5c6890';}}
   }});
 }}
 function loadAIKnowledge(){{
@@ -1083,6 +1103,10 @@ function loadAIKnowledge(){{
     // Savol so'zlari tabini ham yangilash
     var wl=document.getElementById('aiWordsList');
     if(wl&&d.words){{wl.innerHTML=d.words.map(function(w){{return '<span style="background:#252d45;border-radius:4px;padding:3px 8px;font-size:.76rem;color:#d4daf0">'+w+'</span>';}}).join('');}}
+    // Badwords tabini yangilash
+    var bl=document.getElementById('aiBadList');
+    if(bl&&d.badwords){{bl.innerHTML=d.badwords.map(function(w){{return '<span style="background:#3b1010;border:1px solid #5c1a1a;border-radius:4px;padding:3px 8px;font-size:.74rem;color:#f05d5d">'+w+' <span onclick="delAIBad(\\''+w+'\\')" style="cursor:pointer;margin-left:3px">x</span></span>';}}).join('');}}
+    if(d.badword_response){{var ri=document.getElementById('aiBadResp');if(ri&&!ri.value)ri.placeholder='Joriy: '+d.badword_response;}}
   }});
 }}
 function deleteAIItem(id){{
@@ -1093,6 +1117,9 @@ function delAITopic(id){{
 }}
 function delAIWord(w){{
   fetch('/api/ai/words/'+encodeURIComponent(w),{{method:'DELETE',headers:{{'X-CSRF-Token':'{get_csrf_token()}'}}}}).then(()=>loadAIKnowledge());
+}}
+function delAIBad(w){{
+  fetch('/api/ai/badwords/'+encodeURIComponent(w),{{method:'DELETE',headers:{{'X-CSRF-Token':'{get_csrf_token()}'}}}}).then(()=>loadAIKnowledge());
 }}
 </script>
 </body></html>"""
@@ -4906,43 +4933,57 @@ AI_WORDS_FILE = AI_DATA_DIR / "question_words.json"
 AI_BADWORDS_FILE = AI_DATA_DIR / "badwords.json"
 
 # ── Haqoratli so'zlar filtri ──────────────────────────────────────────────
-_DEFAULT_BADWORDS = [
-    "axmoq","tentak","eshak","hayvon","jinni","ablah","nodon",
-    "badnafs","iflos","murdor","harom","shayton",
-    "fuck","shit","damn","ass","bitch","idiot","stupid","dumb",
-    "bastard","moron","retard","nigga","nigger","whore","slut",
-]
+# Foydalanuvchi o'zi qo'shadi — standart ro'yxat BO'SH
+_DEFAULT_BADWORDS = []
 
 def _load_badwords():
     if AI_BADWORDS_FILE.exists():
         try:
             with open(AI_BADWORDS_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+                return data.get("words", []) if isinstance(data, dict) else data
         except Exception:
             pass
     return _DEFAULT_BADWORDS
 
-def _save_badwords(words):
+def _load_badword_responses():
+    """Haqoratli so'zga javob matnini yuklaydi."""
+    if AI_BADWORDS_FILE.exists():
+        try:
+            with open(AI_BADWORDS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data.get("response", "")
+        except Exception:
+            pass
+    return ""
+
+def _save_badwords_data(words, response=""):
     with open(AI_BADWORDS_FILE, "w", encoding="utf-8") as f:
-        json.dump(words, f, ensure_ascii=False, indent=2)
+        json.dump({"words": words, "response": response}, f, ensure_ascii=False, indent=2)
 
 def _contains_profanity(text):
-    """Matnda haqoratli so'z bor-yo'qligini tekshiradi (harflar orasidagi belgilarni ham aniqlaydi)."""
+    """Matnda haqoratli so'z bor-yo'qligini tekshiradi."""
     badwords = _load_badwords()
-    # Matnni tozalash: harflardan boshqa belgilarni olib tashlash
-    cleaned = re.sub(r'[^a-zA-Z0-9\u0400-\u04FF\u0600-\u06FF]', '', text.lower())
-    # Asl matn ham tekshiriladi
+    if not badwords:
+        return False
+    cleaned = re.sub(r'[^a-zA-Z0-9\u0400-\u04FF]', '', text.lower())
     text_lower = text.lower()
     for word in badwords:
-        word_clean = re.sub(r'[^a-zA-Z0-9\u0400-\u04FF\u0600-\u06FF]', '', word.lower())
+        if not word or len(word) < 2:
+            continue
+        word_clean = re.sub(r'[^a-zA-Z0-9\u0400-\u04FF]', '', word.lower())
+        if len(word_clean) < 2:
+            continue
         if word_clean in cleaned:
             return True
         if word.lower() in text_lower:
             return True
-        # Harflar orasiga belgi qo'yilgan holat: a.x.m.o.q, a-x-m-o-q
-        pattern = r'[^a-zA-Z\u0400-\u04FF]*'.join(re.escape(ch) for ch in word.lower())
-        if re.search(pattern, text_lower):
-            return True
+        # Harflar orasiga belgi qo'yilgan holat
+        if len(word) >= 3:
+            pattern = r'[^a-zA-Z\u0400-\u04FF]*'.join(re.escape(ch) for ch in word.lower())
+            if re.search(pattern, text_lower):
+                return True
     return False
 
 # ── Bilim bazasi yuklash/saqlash ──────────────────────────────────────────
@@ -4990,11 +5031,83 @@ def _save_question_words(words):
         json.dump(words, f, ensure_ascii=False, indent=2)
 
 # ── Javob topish algoritmi ────────────────────────────────────────────────
+def _ai_solve_math(text):
+    """Matematik ifodani hisoblashga urinadi. Xavfsiz eval."""
+    # Matndan raqam va operatorlarni ajratib olish
+    # "2+2 javobi nechchi" -> "2+2", "2+2 nechchi" -> "2+2"
+    cleaned = re.sub(r'(javobi|javob|nechchi|necha|nechta|qancha|hisobla|hisob)', '', text.lower()).strip()
+    cleaned = re.sub(r'[^\d+\-*/().%^ ]', '', cleaned).strip()
+    if not cleaned or not re.search(r'\d', cleaned):
+        return None
+    # ^ ni ** ga aylantirish
+    cleaned = cleaned.replace('^', '**')
+    try:
+        # Faqat xavfsiz belgilar
+        if re.match(r'^[\d+\-*/().%\s*]+$', cleaned):
+            result = eval(cleaned, {"__builtins__": {}}, {})
+            if isinstance(result, float) and result == int(result):
+                result = int(result)
+            return str(result)
+    except Exception:
+        pass
+    return None
+
+def _ai_play_game(text):
+    """Oddiy o'yinlar."""
+    import random
+    t = text.lower().strip()
+    # Tosh-qaychi-qog'oz
+    if any(w in t for w in ["tosh", "qaychi", "qogoz", "qog'oz", "kagoz"]):
+        choices = ["tosh", "qaychi", "qogoz"]
+        user_choice = None
+        if "tosh" in t: user_choice = "tosh"
+        elif "qaychi" in t: user_choice = "qaychi"
+        elif any(w in t for w in ["qogoz", "qog'oz", "kagoz"]): user_choice = "qogoz"
+        if user_choice:
+            ai_choice = random.choice(choices)
+            wins = {"tosh": "qaychi", "qaychi": "qogoz", "qogoz": "tosh"}
+            emoji = {"tosh": "🪨", "qaychi": "✂️", "qogoz": "📄"}
+            if user_choice == ai_choice:
+                return f"Men: {emoji[ai_choice]} {ai_choice}\nSiz: {emoji[user_choice]} {user_choice}\n\n🤝 Durrang!"
+            elif wins[user_choice] == ai_choice:
+                return f"Men: {emoji[ai_choice]} {ai_choice}\nSiz: {emoji[user_choice]} {user_choice}\n\n🎉 Siz yutdingiz!"
+            else:
+                return f"Men: {emoji[ai_choice]} {ai_choice}\nSiz: {emoji[user_choice]} {user_choice}\n\n😎 Men yutdim!"
+        return "Tosh-qaychi-qogoz o'ynaylikmi? 'tosh', 'qaychi' yoki 'qogoz' yozing!"
+    # Son topish o'yini
+    if any(w in t for w in ["oyin", "o'yin", "oyna", "game", "zerik"]):
+        return "🎮 O'yinlar:\n• Tosh-qaychi-qogoz: 'tosh', 'qaychi' yoki 'qogoz' yozing\n• Matematik: '2+2', '15*3', '100/4' kabi misol yozing\n• Tasodifiy son: 'son ber' yozing (1-100)\n• Latifa: 'latifa' yozing"
+    # Tasodifiy son
+    if "son" in t and ("ber" in t or "ayt" in t or "tanlа" in t):
+        n = random.randint(1, 100)
+        return f"🎲 Tasodifiy son: **{n}**"
+    # Latifa
+    if any(w in t for w in ["latifa", "hazil", "kul", "anekdot"]):
+        jokes = [
+            "Dasturchi nega yomg'irni yaxshi ko'radi? Chunki bug (xato) lar yo'qoladi! 😄",
+            "— Salom, texnik yordam? Kompyuterim ishlamayapti.\n— Yoqib ko'rdingizmi?\n— Ha, juda yoqadi! 😂",
+            "Dasturchi turmushga chiqdi... catch blokida 💍",
+            "Wi-Fi parolni bilasizmi?\n— Ha, devorga yozilgan.\n— 12345678mi?\n— Yo'q, 'devorga_yozilgan' 😂",
+            "Nechta dasturchi lampochka almashtirishi kerak? Hech biri — bu hardware muammo! 💡",
+        ]
+        return random.choice(jokes)
+    return None
+
 def _ai_find_answer(question, username=""):
     """Savol uchun eng yaxshi javobni topadi."""
     q_lower = question.lower().strip()
     q_words = set(re.findall(r'\w+', q_lower))
     question_words = _load_question_words()
+
+    # ── Matematik amallar ──
+    math_result = _ai_solve_math(question)
+    if math_result is not None:
+        return f"🧮 Javob: **{math_result}**"
+
+    # ── O'yinlar ──
+    game_result = _ai_play_game(question)
+    if game_result is not None:
+        return game_result
 
     # ── Ism haqida savollar ──
     name_patterns = [
@@ -5071,7 +5184,10 @@ def api_ai_ask():
         return jsonify({"answer": "Savol bo'sh"})
     # Haqoratli so'z tekshiruvi
     if _contains_profanity(question):
-        return jsonify({"answer": "⚠️ Iltimos, hurmatli muloqot qiling. Haqoratli so'zlar ishlatish mumkin emas."})
+        custom_resp = _load_badword_responses()
+        if custom_resp:
+            return jsonify({"answer": custom_resp})
+        return jsonify({"answer": "⚠️ Iltimos, hurmatli muloqot qiling."})
     username = session.get("username", "")
     answer = _ai_find_answer(question, username)
     # Log saqlash
@@ -5088,12 +5204,24 @@ def api_ai_ask():
 @user_req
 def api_ai_train():
     d = request.get_json() or {}
-    train_type = d.get("type", "qa")  # "qa", "topic", "word"
-    # Haqoratli so'z tekshiruvi
-    for field in ("question", "answer", "topic", "info", "word"):
-        val = d.get(field, "")
-        if val and _contains_profanity(val):
-            return jsonify({"ok": False, "error": "⚠️ Haqoratli so'zlar ishlatish mumkin emas!"})
+    train_type = d.get("type", "qa")  # "qa", "topic", "word", "badword"
+    # Haqoratli so'z tekshiruvi (badword turida tekshirmaymiz — chunki o'zi qo'shilmoqda)
+    if train_type != "badword":
+        for field in ("question", "answer", "topic", "info"):
+            val = d.get(field, "")
+            if val and _contains_profanity(val):
+                return jsonify({"ok": False, "error": "⚠️ Haqoratli so'z aniqlandi!"})
+    if train_type == "badword":
+        # Haqoratli so'z qo'shish / javob o'zgartirish
+        word = (d.get("word") or "").strip().lower()
+        response = (d.get("response") or "").strip()
+        words = _load_badwords()
+        if word and word not in words:
+            words.append(word)
+        if response or word:
+            old_resp = _load_badword_responses()
+            _save_badwords_data(words, response or old_resp)
+        return jsonify({"ok": True, "words": words})
     if train_type == "word":
         # Savol so'zi qo'shish
         word = (d.get("word") or "").strip().lower()
@@ -5138,7 +5266,10 @@ def api_ai_knowledge():
     knowledge = _load_ai_knowledge()
     topics = _load_ai_topics()
     words = _load_question_words()
-    return jsonify({"items": knowledge, "topics": topics, "words": words})
+    badwords = _load_badwords()
+    badword_response = _load_badword_responses()
+    return jsonify({"items": knowledge, "topics": topics, "words": words,
+                    "badwords": badwords, "badword_response": badword_response})
 
 @app.route("/api/ai/knowledge/<int:kid>", methods=["DELETE"])
 @user_req
@@ -5162,6 +5293,15 @@ def api_ai_word_delete(word):
     words = _load_question_words()
     words = [w for w in words if w != word]
     _save_question_words(words)
+    return jsonify({"ok": True})
+
+@app.route("/api/ai/badwords/<word>", methods=["DELETE"])
+@user_req
+def api_ai_badword_delete(word):
+    words = _load_badwords()
+    words = [w for w in words if w != word]
+    resp = _load_badword_responses()
+    _save_badwords_data(words, resp)
     return jsonify({"ok": True})
 
 
