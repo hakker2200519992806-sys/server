@@ -309,6 +309,74 @@ def setup_db():
             expires_at TEXT NOT NULL,
             used INTEGER DEFAULT 0,
             created_at TEXT DEFAULT (datetime('now')))""",
+
+        # ═══════════════ YANGI FUNKSIYALAR UCHUN JADVALLAR ═══════════════
+
+        # Jamoa/Team tizimi
+        """CREATE TABLE IF NOT EXISTS project_teams (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            role TEXT DEFAULT 'viewer',
+            invited_by INTEGER,
+            created_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(project_id, user_id))""",
+
+        # Audit trail — barcha o'zgarishlar logi
+        """CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            username TEXT,
+            action TEXT NOT NULL,
+            target_type TEXT,
+            target_id TEXT,
+            details TEXT,
+            ip_address TEXT,
+            created_at TEXT DEFAULT (datetime('now')))""",
+
+        # Real-time Chat xabarlari
+        """CREATE TABLE IF NOT EXISTS chat_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            username TEXT,
+            message TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now')))""",
+
+        # TODO/Vazifalar ro'yxati
+        """CREATE TABLE IF NOT EXISTS project_todos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            is_done INTEGER DEFAULT 0,
+            priority TEXT DEFAULT 'normal',
+            created_at TEXT DEFAULT (datetime('now')),
+            completed_at TEXT)""",
+
+        # IP Whitelist
+        """CREATE TABLE IF NOT EXISTS ip_whitelist (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ip_address TEXT NOT NULL UNIQUE,
+            label TEXT,
+            added_by INTEGER,
+            created_at TEXT DEFAULT (datetime('now')))""",
+
+        # Custom domain/subdomain
+        """CREATE TABLE IF NOT EXISTS custom_domains (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            domain TEXT NOT NULL UNIQUE,
+            is_active INTEGER DEFAULT 1,
+            created_by INTEGER,
+            created_at TEXT DEFAULT (datetime('now')))""",
+
+        # Uptime monitoring logs
+        """CREATE TABLE IF NOT EXISTS uptime_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            status TEXT DEFAULT 'up',
+            response_ms INTEGER,
+            checked_at TEXT DEFAULT (datetime('now')))""",
     ]
     _setup_backend_tables()
     for s in stmts:
@@ -769,7 +837,11 @@ def _pg(title, body, act="dash", flash=None, ftype="ok"):
         {_nav('/admin/blocked','🚫 Bloklangan IP','blocked'==act)}
         {_nav('/admin/bandwidth','📊 Bandwidth','bw'==act)}
         {_nav('/admin/monitor','📟 Monitoring','monitor'==act)}
+        {_nav('/admin/uptime','📉 Uptime','uptime'==act)}
         {_nav('/admin/backend/logs','🐍 Backend','backend'==act)}
+        {_nav('/admin/audit','📝 Audit','audit'==act)}
+        {_nav('/admin/ip-whitelist','🔒 IP Whitelist','ipwl'==act)}
+        {_nav('/admin/domains','🌐 Domenlar','domains'==act)}
         {_nav('/admin/settings','⚙️ Sozlamalar','settings'==act)}"""
     rb = f'<span class="bx {"xg" if adm else "xb"}">{role}</span>'
     return f"""<!DOCTYPE html>
@@ -1484,6 +1556,13 @@ li.CodeMirror-hint-active{background:#7c6fff !important;color:#fff !important}
   <button class="btn bgh bsm" onclick="openHistory()">🕘 Tarix</button>
   <button class="btn bgh bsm" onclick="openBackendPanel()">🐍 Backend</button>
   <button class="btn bgh bsm" onclick="openHelpPanel()">❓ Yordam</button>
+  <button class="btn bgh bsm" onclick="openChatPanel()">💬 Chat</button>
+  <button class="btn bgh bsm" onclick="openTodoPanel()">🎯 TODO</button>
+  <button class="btn bgh bsm" onclick="openComponentsPanel()">🧩 Komponent</button>
+  <button class="btn bgh bsm" onclick="openColorPicker()">📐 Rang</button>
+  <button class="btn bgh bsm" onclick="openTerminal()">💻 Terminal</button>
+  <button class="btn bgh bsm" onclick="generatePWA()">📱 PWA</button>
+  <button class="btn bgh bsm" onclick="generateReadme()">📑 README</button>
   <a href="/projects/download/UUID" class="btn bgh bsm">⬇ ZIP</a>
   <span class="khint" title="Emmet: div.foo#bar, ul>li*3, div+p, (div>p)*2, a{Matn} kabi qisqartmalarni yozib Tab yoki Enter bosing&#10;CSS: w100%, h50vh, m10-20, p0, df, jcc, aic, fxd, tac kabi qisqartmalar ham qo'llab-quvvatlanadi&#10;Ctrl+Space — takliflar ro'yxati&#10;Ctrl+P — Quick Open&#10;Ctrl+Shift+F — global qidiruv&#10;Ctrl+S — saqlash&#10;Ctrl+Enter — ishga tushirish&#10;Ctrl+/ — izohga olish&#10;Shift+Alt+F — formatlash&#10;Alt+Click — qo'shimcha kursor (multi-cursor)&#10;O'ng tugma — fayl daraxtida yangi fayl/papka/nomini o'zgartirish/o'chirish&#10;Sudrab tashlash — faylni boshqa papkaga ko'chirish">⌨ Tugmalar</span>
   <a href="/projects" class="btn bgh bsm">← Loyihalar</a>
@@ -1639,6 +1718,62 @@ li.CodeMirror-hint-active{background:#7c6fff !important;color:#fff !important}
       <tr><td style="color:var(--gr)">Backend</td><td>Loyiha ichidagi Python serverless funksiyalar</td></tr>
     </tbody></table>
 
+  </div>
+</div></div>
+
+<div class="modalBg" id="chatBg"><div class="modalBox" style="max-width:480px;height:70vh">
+  <div style="padding:10px 14px;border-bottom:1px solid var(--brd);display:flex;align-items:center;justify-content:space-between">
+    <b style="color:#fff">💬 Loyiha chati</b>
+    <button class="btn bgh bsm" onclick="closeModal('chatBg')">✕</button></div>
+  <div id="chatMessages" style="flex:1;overflow-y:auto;padding:10px;font-size:.82rem"></div>
+  <div style="padding:8px 14px;border-top:1px solid var(--brd);display:flex;gap:6px">
+    <input type="text" id="chatInput" placeholder="Xabar yozing..." style="flex:1;padding:7px 10px;background:var(--bg);border:1px solid var(--brd);border-radius:6px;color:var(--tx);font-size:.82rem" onkeydown="if(event.key==='Enter')sendChat()">
+    <button class="btn bp bsm" onclick="sendChat()">↑</button>
+  </div>
+</div></div>
+
+<div class="modalBg" id="todoBg"><div class="modalBox" style="max-width:500px">
+  <div style="padding:10px 14px;border-bottom:1px solid var(--brd);display:flex;align-items:center;justify-content:space-between">
+    <b style="color:#fff">🎯 TODO / Vazifalar</b>
+    <button class="btn bgh bsm" onclick="closeModal('todoBg')">✕</button></div>
+  <div style="padding:10px 14px;display:flex;gap:6px">
+    <input type="text" id="todoInput" placeholder="Yangi vazifa..." style="flex:1;padding:7px 10px;background:var(--bg);border:1px solid var(--brd);border-radius:6px;color:var(--tx);font-size:.82rem" onkeydown="if(event.key==='Enter')addTodo()">
+    <select id="todoPriority" style="padding:5px;background:var(--bg);border:1px solid var(--brd);border-radius:6px;color:var(--tx);font-size:.78rem"><option value="normal">Normal</option><option value="high">Yuqori</option><option value="low">Past</option></select>
+    <button class="btn bp bsm" onclick="addTodo()">+</button>
+  </div>
+  <div class="modalList" id="todoList" style="max-height:50vh;overflow-y:auto"></div>
+</div></div>
+
+<div class="modalBg" id="compBg"><div class="modalBox" style="max-width:700px;max-height:80vh">
+  <div style="padding:10px 14px;border-bottom:1px solid var(--brd);display:flex;align-items:center;justify-content:space-between">
+    <b style="color:#fff">🧩 Komponent kutubxonasi</b>
+    <button class="btn bgh bsm" onclick="closeModal('compBg')">✕</button></div>
+  <div class="modalList" id="compList" style="overflow-y:auto"></div>
+</div></div>
+
+<div class="modalBg" id="colorBg"><div class="modalBox" style="max-width:420px">
+  <div style="padding:10px 14px;border-bottom:1px solid var(--brd);display:flex;align-items:center;justify-content:space-between">
+    <b style="color:#fff">📐 Color Picker</b>
+    <button class="btn bgh bsm" onclick="closeModal('colorBg')">✕</button></div>
+  <div style="padding:14px">
+    <input type="color" id="colorPickerInput" value="#7c6fff" style="width:100%;height:40px;border:none;cursor:pointer;border-radius:6px">
+    <div style="margin-top:8px;display:flex;gap:6px;align-items:center">
+      <input type="text" id="colorHexVal" value="#7c6fff" style="flex:1;padding:6px 10px;background:var(--bg);border:1px solid var(--brd);border-radius:6px;color:var(--tx);font-family:monospace;font-size:.85rem">
+      <button class="btn bp bsm" onclick="insertColor()">Qo'shish</button>
+    </div>
+    <div id="colorPalettes" style="margin-top:12px"></div>
+  </div>
+</div></div>
+
+<div class="modalBg" id="termBg"><div class="modalBox" style="max-width:700px;height:70vh">
+  <div style="padding:10px 14px;border-bottom:1px solid var(--brd);display:flex;align-items:center;justify-content:space-between">
+    <b style="color:#fff">💻 Terminal</b>
+    <button class="btn bgh bsm" onclick="closeModal('termBg')">✕</button></div>
+  <div id="termOutput" style="flex:1;overflow-y:auto;padding:10px;font-family:monospace;font-size:.78rem;background:#05060a;color:var(--gr);white-space:pre-wrap"></div>
+  <div style="padding:8px 14px;border-top:1px solid var(--brd);display:flex;gap:6px">
+    <span style="color:var(--gr);font-family:monospace;font-size:.82rem">$</span>
+    <input type="text" id="termInput" placeholder="Buyruq kiriting..." style="flex:1;padding:7px 10px;background:var(--bg);border:1px solid var(--brd);border-radius:6px;color:var(--tx);font-family:monospace;font-size:.82rem" onkeydown="if(event.key==='Enter')runTermCmd()">
+    <button class="btn bp bsm" onclick="runTermCmd()">▶</button>
   </div>
 </div></div>
 
@@ -2673,7 +2808,7 @@ function runGlobalSearch(){
 function runGlobalReplace(){
   var q = document.getElementById('gsQuery').value;
   var rep = document.getElementById('gsReplace').value;
-  if (!q) { flash('⚠ Qidiruv so\\'zi bo\\'sh','yl'); return; }
+  if (!q) { flash('⚠ Qidiruv so\\'zi bosh','yl'); return; }
   if (!confirm("Barcha fayllarda \\""+q+"\\" ni \\""+rep+"\\" ga almashtirasizmi? Bekor qilib bo'lmaydi.")) return;
   var changed = 0;
   fileList.forEach(function(f){
@@ -2710,7 +2845,7 @@ function renderSnippetList(){
     row.querySelector('button').onclick = function(){ delSnippet(s.id); };
     list.appendChild(row);
   });
-  if (!userSnippets.length) list.innerHTML = '<div class="modalRow"><small>Hali snippet yo\\'q</small></div>';
+  if (!userSnippets.length) list.innerHTML = '<div class="modalRow"><small>Hali snippet yoq</small></div>';
 }
 function addSnippet(){
   var lang = document.getElementById('snpLang').value;
@@ -2764,7 +2899,7 @@ function openHistory(){
         };
         list.appendChild(row);
       });
-      if (!(d.history||[]).length) list.innerHTML = '<div class="modalRow"><small>Tarix bo\\'sh</small></div>';
+      if (!(d.history||[]).length) list.innerHTML = '<div class="modalRow"><small>Tarix bosh</small></div>';
     });
 }
 
@@ -2778,6 +2913,186 @@ document.addEventListener('DOMContentLoaded', function(){
   var hbg = document.getElementById('helpBg');
   if (hbg) hbg.addEventListener('click', function(e){
     if (e.target.id === 'helpBg') closeModal('helpBg');
+  });
+});
+
+/* ══════════════════════════════════════════════════════════════════════
+   CHAT — Loyiha ichidagi jonli chat
+   ══════════════════════════════════════════════════════════════════════ */
+var chatInterval=null;
+function openChatPanel(){
+  document.getElementById('chatBg').style.display='flex';
+  loadChat();
+  if(chatInterval) clearInterval(chatInterval);
+  chatInterval=setInterval(loadChat,3000);
+}
+function loadChat(){
+  authFetch('/api/chat/UUID/messages').then(function(r){return r.json();}).then(function(d){
+    var box=document.getElementById('chatMessages');
+    box.innerHTML=(d.messages||[]).map(function(m){
+      return '<div style="margin-bottom:6px"><b style="color:var(--ac);font-size:.75rem">'+m.username+'</b> <span class="tm" style="font-size:.65rem">'+m.created_at.slice(11,16)+'</span><br><span>'+m.message+'</span></div>';
+    }).join('') || '<p class="tm" style="text-align:center;margin-top:20px">Hali xabar yoq</p>';
+    box.scrollTop=box.scrollHeight;
+  });
+}
+function sendChat(){
+  var inp=document.getElementById('chatInput');
+  var msg=inp.value.trim();
+  if(!msg) return;
+  authFetch('/api/chat/UUID/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg})}).then(function(){inp.value='';loadChat();});
+}
+document.addEventListener('DOMContentLoaded',function(){
+  document.getElementById('chatBg').addEventListener('click',function(e){if(e.target.id==='chatBg'){closeModal('chatBg');if(chatInterval)clearInterval(chatInterval);}});
+});
+
+/* ══════════════════════════════════════════════════════════════════════
+   TODO — Loyiha vazifalar ro'yxati
+   ══════════════════════════════════════════════════════════════════════ */
+function openTodoPanel(){
+  document.getElementById('todoBg').style.display='flex';
+  loadTodos();
+}
+function loadTodos(){
+  authFetch('/api/todos/UUID').then(function(r){return r.json();}).then(function(d){
+    var list=document.getElementById('todoList');
+    list.innerHTML=(d.todos||[]).map(function(t){
+      var pri={'high':'🔴','normal':'🟡','low':'🟢'}[t.priority]||'🟡';
+      return '<div class="modalRow" style="'+(t.is_done?'opacity:.5;text-decoration:line-through':'')+'"><span>'+pri+' '+t.title+'</span><span class="fl"><button class="btn bgh bsm" onclick="toggleTodo('+t.id+','+(!t.is_done)+')">✓</button><button class="btn br bsm" onclick="delTodo('+t.id+')">🗑</button></span></div>';
+    }).join('') || '<div class="modalRow"><small>Vazifa yoq</small></div>';
+  });
+}
+function addTodo(){
+  var inp=document.getElementById('todoInput');var title=inp.value.trim();
+  var pri=document.getElementById('todoPriority').value;
+  if(!title){flash('⚠ Vazifa kiriting','yl');return;}
+  authFetch('/api/todos/UUID',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:title,priority:pri})}).then(function(r){return r.json();}).then(function(d){if(d.ok){inp.value='';loadTodos();flash('✓ Qo\\'shildi','gr');}});
+}
+function toggleTodo(id,done){
+  authFetch('/api/todos/UUID/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({is_done:done})}).then(function(){loadTodos();});
+}
+function delTodo(id){
+  authFetch('/api/todos/UUID/'+id,{method:'DELETE'}).then(function(){loadTodos();});
+}
+document.addEventListener('DOMContentLoaded',function(){document.getElementById('todoBg').addEventListener('click',function(e){if(e.target.id==='todoBg')closeModal('todoBg');});});
+
+/* ══════════════════════════════════════════════════════════════════════
+   KOMPONENT KUTUBXONASI
+   ══════════════════════════════════════════════════════════════════════ */
+function openComponentsPanel(){
+  document.getElementById('compBg').style.display='flex';
+  authFetch('/api/components').then(function(r){return r.json();}).then(function(d){
+    var list=document.getElementById('compList');
+    list.innerHTML=(d.components||[]).map(function(c){
+      return '<div class="modalRow" style="flex-direction:column;align-items:flex-start"><div class="fl" style="width:100%"><b style="color:#fff;font-size:.82rem">'+c.name+'</b><span class="bx xp mla">'+c.category+'</span><button class="btn bp bsm" onclick="insertComponent('+JSON.stringify(JSON.stringify(c.code))+')">+ Qo\\'shish</button></div></div>';
+    }).join('');
+  });
+}
+function insertComponent(code){
+  if(!cm||!activePath) return;
+  var cur=cm.getCursor();
+  cm.replaceRange(JSON.parse(code)+'\\n',cur);
+  closeModal('compBg');
+  flash('✓ Komponent qo\\'shildi','gr');
+  scheduleRun();
+}
+document.addEventListener('DOMContentLoaded',function(){document.getElementById('compBg').addEventListener('click',function(e){if(e.target.id==='compBg')closeModal('compBg');});});
+
+/* ══════════════════════════════════════════════════════════════════════
+   COLOR PICKER
+   ══════════════════════════════════════════════════════════════════════ */
+function openColorPicker(){
+  document.getElementById('colorBg').style.display='flex';
+  loadPalettes();
+  document.getElementById('colorPickerInput').oninput=function(){document.getElementById('colorHexVal').value=this.value;};
+}
+function loadPalettes(){
+  authFetch('/api/color/palette').then(function(r){return r.json();}).then(function(d){
+    var box=document.getElementById('colorPalettes');
+    var html='';
+    Object.keys(d.palettes||{}).forEach(function(name){
+      html+='<p style="color:var(--mt);font-size:.72rem;margin:8px 0 4px">'+name+'</p><div style="display:flex;flex-wrap:wrap;gap:4px">';
+      d.palettes[name].forEach(function(c){
+        html+='<div onclick="pickColor(\\''+c+'\\')" style="width:24px;height:24px;border-radius:4px;cursor:pointer;background:'+c+';border:1px solid var(--brd)" title="'+c+'"></div>';
+      });
+      html+='</div>';
+    });
+    box.innerHTML=html;
+  });
+}
+function pickColor(c){document.getElementById('colorHexVal').value=c;document.getElementById('colorPickerInput').value=c;}
+function insertColor(){
+  var c=document.getElementById('colorHexVal').value;
+  if(!cm||!activePath) return;
+  var cur=cm.getCursor();
+  cm.replaceRange(c,cur);
+  closeModal('colorBg');
+  flash('✓ Rang qo\\'shildi: '+c,'gr');
+}
+document.addEventListener('DOMContentLoaded',function(){document.getElementById('colorBg').addEventListener('click',function(e){if(e.target.id==='colorBg')closeModal('colorBg');});});
+
+/* ══════════════════════════════════════════════════════════════════════
+   TERMINAL
+   ══════════════════════════════════════════════════════════════════════ */
+function openTerminal(){document.getElementById('termBg').style.display='flex';document.getElementById('termInput').focus();}
+function runTermCmd(){
+  var inp=document.getElementById('termInput');var cmd=inp.value.trim();
+  if(!cmd) return;
+  var out=document.getElementById('termOutput');
+  out.innerHTML+='<span style="color:var(--ac)">$ '+cmd+'</span>\\n';
+  inp.value='';
+  authFetch('/api/terminal/exec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:cmd})}).then(function(r){return r.json();}).then(function(d){
+    if(d.ok) out.innerHTML+='<span>'+((d.output||'').replace(/</g,'&lt;'))+'</span>\\n';
+    else out.innerHTML+='<span style="color:var(--rd)">Xato: '+(d.error||'')+'</span>\\n';
+    out.scrollTop=out.scrollHeight;
+  }).catch(function(){out.innerHTML+='<span style="color:var(--rd)">Tarmoq xatosi</span>\\n';});
+}
+document.addEventListener('DOMContentLoaded',function(){document.getElementById('termBg').addEventListener('click',function(e){if(e.target.id==='termBg')closeModal('termBg');});});
+
+/* ══════════════════════════════════════════════════════════════════════
+   PWA GENERATOR
+   ══════════════════════════════════════════════════════════════════════ */
+function generatePWA(){
+  if(!confirm('Loyihaga PWA fayllarni (manifest.json, sw.js) qo\\'shish va index.html ni yangilashni xohlaysizmi?')) return;
+  authFetch('/api/pwa/generate/UUID',{method:'POST'}).then(function(r){return r.json();}).then(function(d){
+    if(d.ok){flash('✓ PWA yaratildi: '+d.files.join(', '),'gr');loadAll();}
+    else flash('✗ Xato','rd');
+  });
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   README GENERATOR
+   ══════════════════════════════════════════════════════════════════════ */
+function generateReadme(){
+  if(!confirm('README.md faylni avtomatik yaratish/yangilashni xohlaysizmi?')) return;
+  authFetch('/api/readme/generate/UUID',{method:'POST'}).then(function(r){return r.json();}).then(function(d){
+    if(d.ok){flash('✓ README.md yaratildi','gr');loadAll();}
+    else flash('✗ Xato','rd');
+  });
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   RASM DRAG&DROP YUKLASH
+   ══════════════════════════════════════════════════════════════════════ */
+document.addEventListener('DOMContentLoaded',function(){
+  var cmHost=document.getElementById('cmHost');
+  if(!cmHost) return;
+  cmHost.addEventListener('dragover',function(e){e.preventDefault();e.dataTransfer.dropEffect='copy';cmHost.style.outline='2px dashed var(--ac)';});
+  cmHost.addEventListener('dragleave',function(){cmHost.style.outline='';});
+  cmHost.addEventListener('drop',function(e){
+    e.preventDefault();cmHost.style.outline='';
+    var files=e.dataTransfer.files;
+    if(!files.length) return;
+    var file=files[0];
+    if(!file.type.startsWith('image/')){flash('⚠ Faqat rasm fayllar','yl');return;}
+    var fd=new FormData();fd.append('image',file);
+    authFetch('/editor/upload-image/UUID',{method:'POST',body:fd}).then(function(r){return r.json();}).then(function(d){
+      if(d.ok){
+        var tag='<img src="'+d.url+'" alt="'+d.filename+'">';
+        if(cm&&activePath) cm.replaceRange(tag+'\\n',cm.getCursor());
+        flash('✓ Rasm yuklandi va qo\\'shildi','gr');
+        scheduleRun();
+      } else flash('✗ '+(d.error||'Xato'),'rd');
+    });
   });
 });
 
@@ -2809,7 +3124,7 @@ function renderBackendList(){
     row.querySelectorAll('button')[1].onclick = function(){ deleteBackendRoute(r.id); };
     list.appendChild(row);
   });
-  if (!beRoutes.length) list.innerHTML = '<div class="modalRow"><small>Hali backend route yo\\'q</small></div>';
+  if (!beRoutes.length) list.innerHTML = '<div class="modalRow"><small>Hali backend route yoq</small></div>';
 }
 function addBackendRoute(){
   var method = document.getElementById('beMethod').value;
@@ -2939,6 +3254,7 @@ def projects_list():
             <a href="/editor/{p['uuid']}" class="btn bp bsm">✏️ Tahrirlash</a>
             <a href="/preview/{p['uuid']}" class="btn bgh bsm" target="_blank">👁 Ko'rish</a>
             <a href="/projects/share/{p['uuid']}" class="btn bg bsm">🔗 Share</a>
+            <a href="/projects/{p['uuid']}/team" class="btn bgh bsm">🧑‍🤝‍🧑 Jamoa</a>
             <a href="/projects/download/{p['uuid']}" class="btn bgh bsm">⬇ ZIP</a>
             <button class="btn bgh bsm" onclick="showLoc('{p['uuid']}')">📍 Manzil</button>
             <form method="POST" action="/projects/delete/{p['uuid']}" onsubmit="return confirm('O\\'chirish?')" style="margin-left:auto">{csrf_field()}
@@ -3828,6 +4144,619 @@ def e404(e):
     <a href="/" class="btn bgh mt">← Asosiy</a></div></body></html>""",404
 
 # ╔══════════════════════════════════════════════════════════════════════════╗
+# ║        YANGI FUNKSIYALAR: Domain, Chat, PWA, Team, Audit, TODO, ...     ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+
+# ── Audit Trail — barcha muhim harakatlarni qayd qilish ───────────────────
+def audit(action, target_type=None, target_id=None, details=None):
+    """Muhim amallarni audit_log jadvaliga yozadi."""
+    try:
+        uid = session.get("user_id")
+        uname = session.get("username", "")
+        ip = get_ip()
+        db_exec("INSERT INTO audit_log (user_id,username,action,target_type,target_id,details,ip_address) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (uid, uname, action, target_type, str(target_id) if target_id else None,
+                 (details or "")[:500], ip), fetch=False)
+    except Exception:
+        pass
+
+
+
+# ── IP Whitelist middleware ────────────────────────────────────────────────
+@app.before_request
+def _check_ip_whitelist():
+    """Agar IP whitelist yoqilgan bo'lsa, faqat ro'yxatdagi IP larni o'tkazadi."""
+    if get_setting("ip_whitelist_enabled", "0") != "1":
+        return None
+    if request.path in ("/login", "/logout") or request.path.startswith("/static"):
+        return None
+    if session.get("admin"):
+        return None
+    ip = get_ip()
+    allowed_ip = q1("SELECT id FROM ip_whitelist WHERE ip_address=?", (ip,))
+    if not allowed_ip:
+        return f"""<!DOCTYPE html><html><head><meta charset=UTF-8>
+        <style>{CSS} body{{display:flex;align-items:center;justify-content:center;min-height:100vh;text-align:center}}</style>
+        </head><body><div><p style="font-size:2.5rem">🔒</p>
+        <h1 style="color:var(--rd);margin:10px 0">Kirish cheklangan</h1>
+        <p class="tm">Sizning IP ({ip}) ruxsat ro'yxatida yo'q.</p>
+        <a href="/login" class="btn bgh mt">Admin sifatida kirish</a>
+        </div></body></html>""", 403
+    return None
+
+
+
+# ── Admin: IP Whitelist boshqaruvi ────────────────────────────────────────
+@app.route("/admin/ip-whitelist", methods=["GET", "POST"])
+@admin_req
+def admin_ip_whitelist():
+    suc = None
+    if request.method == "POST":
+        action = request.form.get("_action", "add")
+        if action == "add":
+            ip = request.form.get("ip", "").strip()
+            label = request.form.get("label", "").strip()
+            if ip:
+                db_exec("INSERT OR IGNORE INTO ip_whitelist (ip_address,label,added_by) VALUES (?,?,?)",
+                        (ip, label, session["user_id"]), fetch=False)
+                audit("ip_whitelist_add", "ip", ip, label)
+                suc = f"IP qo'shildi: {ip}"
+        elif action == "delete":
+            wid = request.form.get("wid")
+            db_exec("DELETE FROM ip_whitelist WHERE id=?", (wid,), fetch=False)
+            audit("ip_whitelist_remove", "ip", wid)
+            suc = "IP o'chirildi"
+        elif action == "toggle":
+            cur = get_setting("ip_whitelist_enabled", "0")
+            set_setting("ip_whitelist_enabled", "0" if cur == "1" else "1")
+            suc = "IP whitelist holati o'zgartirildi"
+    wl_on = get_setting("ip_whitelist_enabled", "0") == "1"
+    ips = db_exec("SELECT * FROM ip_whitelist ORDER BY created_at DESC") or []
+    rows = "".join(f"""<tr><td><code>{ip['ip_address']}</code></td><td>{ip.get('label') or '—'}</td>
+      <td class="tm" style="font-size:.74rem">{str(ip['created_at'])[:16]}</td>
+      <td><form method="POST">{csrf_field()}<input type="hidden" name="_action" value="delete">
+        <input type="hidden" name="wid" value="{ip['id']}">
+        <button class="btn br bsm">🗑</button></form></td></tr>""" for ip in ips)
+    body = f"""
+    <h2 style="color:#fff;margin-bottom:14px">🔒 IP Whitelist</h2>
+    <div class="card">
+      <div class="fl mb">
+        <span class="bx {'xg' if wl_on else 'xm'}">{'Yoqilgan' if wl_on else "O'chirilgan"}</span>
+        <form method="POST" style="margin-left:auto">{csrf_field()}
+          <input type="hidden" name="_action" value="toggle">
+          <button class="btn {'br' if wl_on else 'bg'} bsm">{"🔴 O'chirish" if wl_on else "🟢 Yoqish"}</button>
+        </form>
+      </div>
+      <p class="tm mb" style="font-size:.79rem">Yoqilganda faqat ro'yxatdagi IP lar saytga kira oladi. Admin har doim kirishi mumkin.</p>
+      <form method="POST" class="row mb">{csrf_field()}<input type="hidden" name="_action" value="add">
+        <input name="ip" placeholder="IP manzil (masalan: 192.168.1.10)" required style="flex:1;padding:7px 10px;background:var(--bg);border:1px solid var(--brd);border-radius:6px;color:var(--tx);font-size:.82rem">
+        <input name="label" placeholder="Izoh" style="flex:1;padding:7px 10px;background:var(--bg);border:1px solid var(--brd);border-radius:6px;color:var(--tx);font-size:.82rem">
+        <button class="btn bp bsm">+ Qo'shish</button>
+      </form>
+      <div class="tw"><table><thead><tr><th>IP</th><th>Izoh</th><th>Qo'shilgan</th><th>Amal</th></tr></thead>
+      <tbody>{rows or '<tr><td colspan=4 style="text-align:center;color:var(--mt);padding:14px">Royxat bosh</td></tr>'}</tbody></table></div>
+    </div>"""
+    return _pg("IP Whitelist", body, "ipwl", flash=suc, ftype="ok")
+
+
+
+# ── Custom Domain / Subdomain ─────────────────────────────────────────────
+@app.route("/admin/domains", methods=["GET", "POST"])
+@admin_req
+def admin_domains():
+    suc = None
+    if request.method == "POST":
+        action = request.form.get("_action", "add")
+        if action == "add":
+            puuid = request.form.get("project_uuid", "").strip()
+            domain = request.form.get("domain", "").strip().lower()
+            proj = q1("SELECT id FROM projects WHERE uuid=?", (puuid,))
+            if proj and domain:
+                db_exec("INSERT OR IGNORE INTO custom_domains (project_id,domain,created_by) VALUES (?,?,?)",
+                        (proj["id"], domain, session["user_id"]), fetch=False)
+                audit("domain_add", "domain", domain)
+                suc = f"Domain qo'shildi: {domain}"
+        elif action == "delete":
+            did = request.form.get("did")
+            db_exec("DELETE FROM custom_domains WHERE id=?", (did,), fetch=False)
+            suc = "Domain o'chirildi"
+        elif action == "toggle":
+            did = request.form.get("did")
+            db_exec("UPDATE custom_domains SET is_active=1-is_active WHERE id=?", (did,), fetch=False)
+            suc = "Domain holati o'zgartirildi"
+    domains = db_exec("SELECT d.*,p.name as pname,p.uuid as puuid FROM custom_domains d LEFT JOIN projects p ON d.project_id=p.id ORDER BY d.created_at DESC") or []
+    projs = db_exec("SELECT uuid,name FROM projects ORDER BY name") or []
+    po = "".join(f'<option value="{p["uuid"]}">{p["name"]}</option>' for p in projs)
+    rows = "".join(f"""<tr>
+      <td><code style="color:var(--ac)">{d['domain']}</code></td>
+      <td>{d.get('pname') or '—'}</td>
+      <td><span class="bx {'xg' if d['is_active'] else 'xr'}">{'Faol' if d['is_active'] else "O'chiq"}</span></td>
+      <td class="fl">
+        <form method="POST">{csrf_field()}<input type="hidden" name="_action" value="toggle"><input type="hidden" name="did" value="{d['id']}">
+          <button class="btn bgh bsm">{'⏸' if d['is_active'] else '▶️'}</button></form>
+        <form method="POST">{csrf_field()}<input type="hidden" name="_action" value="delete"><input type="hidden" name="did" value="{d['id']}">
+          <button class="btn br bsm">🗑</button></form>
+      </td></tr>""" for d in domains)
+    body = f"""
+    <h2 style="color:#fff;margin-bottom:14px">🌐 Custom Domain / Subdomain</h2>
+    <div class="card">
+      <p class="tm mb" style="font-size:.79rem">Har loyihaga o'z domain/subdomain berish. DNS A yozuvini server IP ga yo'naltiring.
+      Loyiha domeni orqali ochilganda avtomatik preview sahifasiga yo'naltiriladi.</p>
+      <form method="POST" class="row mb">{csrf_field()}<input type="hidden" name="_action" value="add">
+        <select name="project_uuid" required style="flex:1;padding:7px;background:var(--bg);border:1px solid var(--brd);border-radius:6px;color:var(--tx)"><option value="">Loyiha tanlang</option>{po}</select>
+        <input name="domain" placeholder="masalan: mysite.example.com" required style="flex:2;padding:7px 10px;background:var(--bg);border:1px solid var(--brd);border-radius:6px;color:var(--tx);font-size:.82rem">
+        <button class="btn bp bsm">+ Qo'shish</button>
+      </form>
+      <div class="tw"><table><thead><tr><th>Domain</th><th>Loyiha</th><th>Holat</th><th>Amallar</th></tr></thead>
+      <tbody>{rows or '<tr><td colspan=4 style="text-align:center;color:var(--mt);padding:14px">Hali domain yoq</td></tr>'}</tbody></table></div>
+    </div>"""
+    return _pg("Domenlar", body, "domains", flash=suc, ftype="ok")
+
+# Domain orqali kelgan so'rovlarni loyiha preview ga yo'naltirish
+@app.before_request
+def _check_custom_domain():
+    host = request.host.split(":")[0].lower()
+    if host in ("127.0.0.1", "localhost", "0.0.0.0"):
+        return None
+    dom = q1("SELECT d.*,p.uuid FROM custom_domains d JOIN projects p ON d.project_id=p.id WHERE d.domain=? AND d.is_active=1", (host,))
+    if dom and request.path == "/":
+        return redirect(f"/preview/{dom['uuid']}")
+    return None
+
+
+
+# ── Jamoa/Team tizimi ─────────────────────────────────────────────────────
+@app.route("/projects/<puuid>/team", methods=["GET", "POST"])
+@user_req
+def project_team(puuid):
+    proj = q1("SELECT * FROM projects WHERE uuid=?", (puuid,))
+    if not proj:
+        abort(404)
+    is_owner = proj["owner_id"] == session["user_id"]
+    if not is_owner and not session.get("admin"):
+        abort(403)
+    suc = err = None
+    if request.method == "POST":
+        action = request.form.get("_action", "invite")
+        if action == "invite":
+            username = request.form.get("username", "").strip()
+            role = request.form.get("role", "viewer")
+            if role not in ("viewer", "editor"):
+                role = "viewer"
+            user = q1("SELECT id FROM users WHERE username=?", (username,))
+            if not user:
+                err = "Foydalanuvchi topilmadi"
+            elif user["id"] == proj["owner_id"]:
+                err = "Loyiha egasini qo'shish shart emas"
+            else:
+                db_exec("INSERT OR REPLACE INTO project_teams (project_id,user_id,role,invited_by) VALUES (?,?,?,?)",
+                        (proj["id"], user["id"], role, session["user_id"]), fetch=False)
+                audit("team_invite", "project", puuid, f"{username} -> {role}")
+                suc = f"{username} jamoga qo'shildi ({role})"
+        elif action == "remove":
+            tid = request.form.get("tid")
+            db_exec("DELETE FROM project_teams WHERE id=? AND project_id=?", (tid, proj["id"]), fetch=False)
+            suc = "Foydalanuvchi jamoadan chiqarildi"
+    members = db_exec("SELECT t.*,u.username,u.email FROM project_teams t JOIN users u ON t.user_id=u.id WHERE t.project_id=? ORDER BY t.created_at", (proj["id"],)) or []
+    rows = "".join(f"""<tr><td>{m['username']}</td><td>{m.get('email','')}</td>
+      <td><span class="bx {'xb' if m['role']=='editor' else 'xm'}">{m['role']}</span></td>
+      <td><form method="POST">{csrf_field()}<input type="hidden" name="_action" value="remove">
+        <input type="hidden" name="tid" value="{m['id']}"><button class="btn br bsm">🗑</button></form></td></tr>""" for m in members)
+    import html as hm
+    body = f"""
+    <h2 style="color:#fff;margin-bottom:14px">🧑‍🤝‍🧑 Jamoa — {hm.escape(proj['name'])}</h2>
+    <div class="card">
+      <form method="POST" class="row mb">{csrf_field()}<input type="hidden" name="_action" value="invite">
+        <input name="username" placeholder="Username" required style="flex:1;padding:7px 10px;background:var(--bg);border:1px solid var(--brd);border-radius:6px;color:var(--tx)">
+        <select name="role" style="padding:7px;background:var(--bg);border:1px solid var(--brd);border-radius:6px;color:var(--tx)">
+          <option value="viewer">Viewer</option><option value="editor">Editor</option></select>
+        <button class="btn bp bsm">+ Taklif qilish</button>
+      </form>
+      <div class="tw"><table><thead><tr><th>Foydalanuvchi</th><th>Email</th><th>Rol</th><th>Amal</th></tr></thead>
+      <tbody>{rows or '<tr><td colspan=4 style="text-align:center;color:var(--mt);padding:14px">Hali jamoa azosi yoq</td></tr>'}</tbody></table></div>
+    </div>
+    <a href="/projects" class="btn bgh mt">← Loyihalar</a>"""
+    return _pg("Jamoa", body, "projects", flash=suc or err, ftype="ok" if suc else "er")
+
+
+
+# ── Real-time Chat (SSE - Server-Sent Events) ─────────────────────────────
+@app.route("/api/chat/<puuid>/messages")
+@user_req
+def chat_messages(puuid):
+    proj = q1("SELECT id FROM projects WHERE uuid=?", (puuid,))
+    if not proj:
+        return jsonify({"messages": []})
+    msgs = db_exec("SELECT * FROM chat_messages WHERE project_id=? ORDER BY id DESC LIMIT 50", (proj["id"],)) or []
+    msgs.reverse()
+    return jsonify({"messages": [{"id": m["id"], "username": m["username"], "message": m["message"],
+                                   "created_at": str(m["created_at"])[:19]} for m in msgs]})
+
+@app.route("/api/chat/<puuid>/send", methods=["POST"])
+@user_req
+def chat_send(puuid):
+    proj = q1("SELECT id FROM projects WHERE uuid=?", (puuid,))
+    if not proj:
+        return jsonify({"ok": False}), 404
+    d = request.get_json() or {}
+    msg = (d.get("message") or "").strip()[:500]
+    if not msg:
+        return jsonify({"ok": False, "error": "Xabar bo'sh"})
+    db_exec("INSERT INTO chat_messages (project_id,user_id,username,message) VALUES (?,?,?,?)",
+            (proj["id"], session["user_id"], session.get("username", ""), msg), fetch=False)
+    return jsonify({"ok": True})
+
+
+
+# ── PWA Generator ─────────────────────────────────────────────────────────
+@app.route("/api/pwa/generate/<puuid>", methods=["POST"])
+@user_req
+@write_req
+def pwa_generate(puuid):
+    proj = q1("SELECT * FROM projects WHERE uuid=?", (puuid,))
+    if not proj:
+        return jsonify({"ok": False}), 404
+    import html as hm
+    name = proj["name"]
+    # manifest.json
+    manifest = json.dumps({
+        "name": name, "short_name": name[:12], "start_url": ".", "display": "standalone",
+        "background_color": "#0d0f18", "theme_color": "#7c6fff",
+        "icons": [{"src": "icon-192.png", "sizes": "192x192", "type": "image/png"},
+                  {"src": "icon-512.png", "sizes": "512x512", "type": "image/png"}]
+    }, indent=2, ensure_ascii=False)
+    # service-worker.js
+    sw = """const CACHE='pwa-v1';const ASSETS=['/','/index.html'];
+self.addEventListener('install',e=>e.waitUntil(caches.open(CACHE).then(c=>c.addAll(ASSETS))));
+self.addEventListener('fetch',e=>e.respondWith(caches.match(e.request).then(r=>r||fetch(e.request))));"""
+    # Fayllarni loyihaga yozamiz
+    db_exec("INSERT INTO project_files (project_id,path,is_folder,content) VALUES (?,?,0,?) "
+            "ON CONFLICT(project_id,path) DO UPDATE SET content=excluded.content,updated_at=datetime('now')",
+            (proj["id"], "manifest.json", manifest), fetch=False)
+    db_exec("INSERT INTO project_files (project_id,path,is_folder,content) VALUES (?,?,0,?) "
+            "ON CONFLICT(project_id,path) DO UPDATE SET content=excluded.content,updated_at=datetime('now')",
+            (proj["id"], "sw.js", sw), fetch=False)
+    # index.html ga manifest va sw registratsiyasini qo'shamiz
+    idx = q1("SELECT content FROM project_files WHERE project_id=? AND path='index.html'", (proj["id"],))
+    if idx and idx.get("content"):
+        html_content = idx["content"]
+        if "manifest.json" not in html_content and "</head>" in html_content:
+            pwa_tags = '  <link rel="manifest" href="manifest.json">\n  <meta name="theme-color" content="#7c6fff">\n'
+            html_content = html_content.replace("</head>", pwa_tags + "</head>")
+        if "sw.js" not in html_content and "</body>" in html_content:
+            sw_reg = "  <script>if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js');</script>\n"
+            html_content = html_content.replace("</body>", sw_reg + "</body>")
+        db_exec("UPDATE project_files SET content=?,updated_at=datetime('now') WHERE project_id=? AND path='index.html'",
+                (html_content, proj["id"]), fetch=False)
+    audit("pwa_generate", "project", puuid)
+    return jsonify({"ok": True, "files": ["manifest.json", "sw.js"]})
+
+
+
+# ── TODO / Vazifalar ro'yxati ──────────────────────────────────────────────
+@app.route("/api/todos/<puuid>", methods=["GET", "POST"])
+@user_req
+def api_todos(puuid):
+    proj = q1("SELECT id FROM projects WHERE uuid=?", (puuid,))
+    if not proj:
+        return jsonify({"todos": []})
+    if request.method == "GET":
+        todos = db_exec("SELECT * FROM project_todos WHERE project_id=? ORDER BY is_done, priority DESC, id DESC",
+                        (proj["id"],)) or []
+        return jsonify({"todos": todos})
+    d = request.get_json() or {}
+    title = (d.get("title") or "").strip()[:200]
+    priority = d.get("priority", "normal")
+    if priority not in ("low", "normal", "high"):
+        priority = "normal"
+    if not title:
+        return jsonify({"ok": False, "error": "Sarlavha kerak"})
+    new_id = db_exec("INSERT INTO project_todos (project_id,user_id,title,priority) VALUES (?,?,?,?)",
+                     (proj["id"], session["user_id"], title, priority), fetch=False)
+    return jsonify({"ok": True, "id": new_id})
+
+@app.route("/api/todos/<puuid>/<int:tid>", methods=["PUT", "DELETE"])
+@user_req
+def api_todo_item(puuid, tid):
+    proj = q1("SELECT id FROM projects WHERE uuid=?", (puuid,))
+    if not proj:
+        abort(404)
+    if request.method == "DELETE":
+        db_exec("DELETE FROM project_todos WHERE id=? AND project_id=?", (tid, proj["id"]), fetch=False)
+        return jsonify({"ok": True})
+    d = request.get_json() or {}
+    is_done = 1 if d.get("is_done") else 0
+    completed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S") if is_done else None
+    db_exec("UPDATE project_todos SET is_done=?,completed_at=? WHERE id=? AND project_id=?",
+            (is_done, completed_at, tid, proj["id"]), fetch=False)
+    return jsonify({"ok": True})
+
+
+
+# ── Rasm yuklash (muharrir ichida drag&drop) ───────────────────────────────
+@app.route("/editor/upload-image/<puuid>", methods=["POST"])
+@user_req
+@write_req
+def editor_upload_image(puuid):
+    proj = q1("SELECT * FROM projects WHERE uuid=?", (puuid,))
+    if not proj:
+        return jsonify({"ok": False}), 404
+    f = request.files.get("image")
+    if not f or not f.filename:
+        return jsonify({"ok": False, "error": "Fayl tanlanmadi"})
+    ext = Path(f.filename).suffix.lower()
+    if ext not in (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico"):
+        return jsonify({"ok": False, "error": "Ruxsat etilmagan format"})
+    safe_name = secure_filename(f.filename)
+    stored = f"{uuid.uuid4().hex[:8]}_{safe_name}"
+    dest = FILES_PATH / stored
+    f.save(str(dest))
+    url = f"/uploads/files/{stored}"
+    audit("image_upload", "project", puuid, safe_name)
+    return jsonify({"ok": True, "url": url, "filename": safe_name})
+
+# Statik uploads xizmat qilish
+@app.route("/uploads/files/<filename>")
+def serve_upload(filename):
+    return send_from_directory(str(FILES_PATH), filename)
+
+
+
+# ── Uptime Monitoring ──────────────────────────────────────────────────────
+_uptime_data = {"checks": [], "last_down": None}
+
+def _uptime_checker():
+    """Har 60 sekundda serverni tekshiradi."""
+    while True:
+        time.sleep(60)
+        try:
+            t0 = time.time()
+            import urllib.request as ur
+            port = CFG["PORT"]
+            try:
+                ur.urlopen(f"http://127.0.0.1:{port}/login", timeout=5)
+                status = "up"
+            except Exception:
+                status = "down"
+            ms = int((time.time() - t0) * 1000)
+            db_exec("INSERT INTO uptime_logs (status,response_ms) VALUES (?,?)", (status, ms), fetch=False)
+            # Eski loglarni tozalash (7 kundan oshgan)
+            db_exec("DELETE FROM uptime_logs WHERE checked_at < datetime('now','-7 days')", fetch=False)
+        except Exception:
+            pass
+
+@app.route("/admin/uptime")
+@admin_req
+def admin_uptime():
+    logs = db_exec("SELECT * FROM uptime_logs ORDER BY id DESC LIMIT 1440") or []  # 24 soat * 60
+    total = len(logs)
+    up_count = sum(1 for l in logs if l["status"] == "up")
+    uptime_pct = round((up_count / total * 100), 2) if total else 100.0
+    avg_ms = round(sum(l["response_ms"] or 0 for l in logs) / total, 1) if total else 0
+    last_down = None
+    for l in logs:
+        if l["status"] == "down":
+            last_down = str(l["checked_at"])[:19]
+            break
+    recent = logs[:60]  # Oxirgi 1 soat
+    bars = "".join(f'<div style="width:2px;height:{min(30, max(3,(l["response_ms"] or 0)//10))}px;background:{"var(--gr)" if l["status"]=="up" else "var(--rd)"};border-radius:1px"></div>' for l in reversed(recent))
+    body = f"""
+    <h2 style="color:#fff;margin-bottom:14px">📉 Uptime Monitoring</h2>
+    <div class="g g4 mb">
+      <div class="stat"><div class="v" style="color:{'var(--gr)' if uptime_pct > 99 else 'var(--yl)'}">{uptime_pct}%</div><div class="l">Uptime (7 kun)</div></div>
+      <div class="stat"><div class="v">{avg_ms}</div><div class="l">O'rtacha javob (ms)</div></div>
+      <div class="stat"><div class="v">{total}</div><div class="l">Tekshiruvlar soni</div></div>
+      <div class="stat"><div class="v" style="font-size:1rem">{last_down or 'Hech qachon'}</div><div class="l">Oxirgi nosozlik</div></div>
+    </div>
+    <div class="card"><h3>Oxirgi 1 soat (har 1 daqiqa)</h3>
+      <div style="display:flex;gap:1px;align-items:end;min-height:34px;padding:8px 0">{bars or '<span class="tm">Malumot yoq</span>'}</div>
+    </div>"""
+    return _pg("Uptime", body, "uptime")
+
+
+
+# ── Audit Trail sahifasi (admin) ───────────────────────────────────────────
+@app.route("/admin/audit")
+@admin_req
+def admin_audit():
+    logs = db_exec("SELECT * FROM audit_log ORDER BY id DESC LIMIT 200") or []
+    rows = "".join(f"""<tr>
+      <td>{l.get('username') or '—'}</td>
+      <td><span class="bx xb">{l['action']}</span></td>
+      <td>{l.get('target_type') or '—'}</td>
+      <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;font-size:.74rem">{(l.get('details') or '—')[:60]}</td>
+      <td><code style="font-size:.72rem">{l.get('ip_address') or '—'}</code></td>
+      <td class="tm" style="font-size:.73rem">{str(l['created_at'])[:19]}</td>
+    </tr>""" for l in logs)
+    body = f"""
+    <h2 style="color:#fff;margin-bottom:14px">📝 Audit Trail</h2>
+    <p class="tm mb" style="font-size:.79rem">Barcha muhim harakatlar logi. Kim, qachon, nima qilgani shu yerda ko'rinadi.</p>
+    <div class="card" style="padding:0"><div class="tw">
+      <table><thead><tr><th>Foydalanuvchi</th><th>Harakat</th><th>Turi</th><th>Tafsilotlar</th><th>IP</th><th>Vaqt</th></tr></thead>
+      <tbody>{rows or '<tr><td colspan=6 style="text-align:center;color:var(--mt);padding:16px">Hali yozuv yoq</td></tr>'}</tbody></table>
+    </div></div>"""
+    return _pg("Audit Trail", body, "audit")
+
+
+
+# ── README Generator ───────────────────────────────────────────────────────
+@app.route("/api/readme/generate/<puuid>", methods=["POST"])
+@user_req
+@write_req
+def readme_generate(puuid):
+    proj = q1("SELECT * FROM projects WHERE uuid=?", (puuid,))
+    if not proj:
+        return jsonify({"ok": False}), 404
+    files = db_exec("SELECT path,is_folder FROM project_files WHERE project_id=? ORDER BY path", (proj["id"],)) or []
+    tree_lines = []
+    for f in files:
+        depth = f["path"].count("/")
+        prefix = "  " * depth + ("📁 " if f["is_folder"] else "📄 ")
+        tree_lines.append(prefix + f["path"].split("/")[-1])
+    tree = "\n".join(tree_lines) or "Fayl yo'q"
+    readme = f"""# {proj['name']}
+
+## Loyiha haqida
+Bu loyiha SrvManager platformasida yaratilgan.
+
+## Fayl tuzilmasi
+```
+{tree}
+```
+
+## Ishga tushirish
+1. Fayllarni yuklab oling (ZIP)
+2. `index.html` ni brauzerda oching
+
+## Texnologiyalar
+- HTML5
+- CSS3
+- JavaScript
+
+## Muallif
+Yaratilgan: {str(proj.get('created_at',''))[:10]}
+
+---
+*SrvManager tomonidan avtomatik yaratilgan*
+"""
+    db_exec("INSERT INTO project_files (project_id,path,is_folder,content) VALUES (?,?,0,?) "
+            "ON CONFLICT(project_id,path) DO UPDATE SET content=excluded.content,updated_at=datetime('now')",
+            (proj["id"], "README.md", readme), fetch=False)
+    audit("readme_generate", "project", puuid)
+    return jsonify({"ok": True, "content": readme})
+
+
+
+# ── Markdown Editor (preview API) ──────────────────────────────────────────
+@app.route("/api/markdown/preview", methods=["POST"])
+@user_req
+def markdown_preview():
+    """Oddiy Markdown ni HTML ga aylantiradi (server tomonda)."""
+    d = request.get_json() or {}
+    md_text = d.get("text", "")
+    # Oddiy markdown parser (tashqi kutubxonasiz)
+    html_out = _simple_md_to_html(md_text)
+    return jsonify({"html": html_out})
+
+def _simple_md_to_html(text):
+    """Minimal markdown -> HTML konverter."""
+    import re as _re
+    lines = text.split("\n")
+    html_lines = []
+    in_code = False
+    for line in lines:
+        if line.startswith("```"):
+            if in_code:
+                html_lines.append("</pre></code>")
+                in_code = False
+            else:
+                html_lines.append("<code><pre>")
+                in_code = True
+            continue
+        if in_code:
+            html_lines.append(line)
+            continue
+        # Headings
+        if line.startswith("### "):
+            html_lines.append(f"<h3>{line[4:]}</h3>")
+        elif line.startswith("## "):
+            html_lines.append(f"<h2>{line[3:]}</h2>")
+        elif line.startswith("# "):
+            html_lines.append(f"<h1>{line[2:]}</h1>")
+        elif line.startswith("- ") or line.startswith("* "):
+            html_lines.append(f"<li>{line[2:]}</li>")
+        elif line.startswith("> "):
+            html_lines.append(f"<blockquote>{line[2:]}</blockquote>")
+        elif line.strip() == "---":
+            html_lines.append("<hr>")
+        elif line.strip() == "":
+            html_lines.append("<br>")
+        else:
+            # Inline formatting
+            l = line
+            l = _re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', l)
+            l = _re.sub(r'\*(.+?)\*', r'<em>\1</em>', l)
+            l = _re.sub(r'`(.+?)`', r'<code>\1</code>', l)
+            l = _re.sub(r'\[(.+?)\]\((.+?)\)', r'<a href="\2">\1</a>', l)
+            l = _re.sub(r'!\[(.+?)\]\((.+?)\)', r'<img src="\2" alt="\1">', l)
+            html_lines.append(f"<p>{l}</p>")
+    if in_code:
+        html_lines.append("</pre></code>")
+    return "\n".join(html_lines)
+
+
+
+# ── Terminal / Shell (xterm.js uchun backend) ──────────────────────────────
+@app.route("/api/terminal/exec", methods=["POST"])
+@admin_req
+def terminal_exec():
+    """Admin uchun server terminalida buyruq bajarish (xavfsizlik: faqat admin)."""
+    d = request.get_json() or {}
+    cmd = (d.get("command") or "").strip()
+    if not cmd:
+        return jsonify({"ok": False, "error": "Buyruq bo'sh"})
+    # Xavfli buyruqlarni bloklash
+    dangerous = ["rm -rf /", "mkfs", "dd if=", ":(){", "fork bomb", "shutdown", "reboot", "halt"]
+    for dng in dangerous:
+        if dng in cmd.lower():
+            return jsonify({"ok": False, "error": "Bu buyruq taqiqlangan"})
+    try:
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10, cwd=os.getcwd())
+        output = result.stdout + result.stderr
+        audit("terminal_exec", "command", None, cmd[:200])
+        return jsonify({"ok": True, "output": output[:5000], "returncode": result.returncode})
+    except subprocess.TimeoutExpired:
+        return jsonify({"ok": False, "error": "Buyruq 10 sekundda yakunlanmadi (timeout)"})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:300]})
+
+
+
+# ── Komponent kutubxonasi (Bootstrap/Tailwind) ─────────────────────────────
+@app.route("/api/components")
+@user_req
+def api_components():
+    """Tayyor HTML komponentlarni qaytaradi."""
+    components = [
+        {"id": "nav-bootstrap", "name": "Navbar (Bootstrap)", "category": "Bootstrap",
+         "code": '<nav class="navbar navbar-expand-lg navbar-dark bg-dark">\n  <div class="container">\n    <a class="navbar-brand" href="#">Logo</a>\n    <button class="navbar-toggler" data-bs-toggle="collapse" data-bs-target="#nav1"><span class="navbar-toggler-icon"></span></button>\n    <div class="collapse navbar-collapse" id="nav1">\n      <ul class="navbar-nav ms-auto"><li class="nav-item"><a class="nav-link" href="#">Bosh sahifa</a></li><li class="nav-item"><a class="nav-link" href="#">Haqida</a></li></ul>\n    </div>\n  </div>\n</nav>'},
+        {"id": "card-bootstrap", "name": "Card (Bootstrap)", "category": "Bootstrap",
+         "code": '<div class="card" style="width:18rem">\n  <img src="https://via.placeholder.com/300x200" class="card-img-top" alt="...">\n  <div class="card-body">\n    <h5 class="card-title">Sarlavha</h5>\n    <p class="card-text">Qisqa tavsif matni.</p>\n    <a href="#" class="btn btn-primary">Batafsil</a>\n  </div>\n</div>'},
+        {"id": "hero-bootstrap", "name": "Hero Section (Bootstrap)", "category": "Bootstrap",
+         "code": '<section class="bg-dark text-white py-5">\n  <div class="container text-center">\n    <h1 class="display-4">Xush kelibsiz!</h1>\n    <p class="lead">Bu yerda asosiy matn joylashadi.</p>\n    <a href="#" class="btn btn-primary btn-lg mt-3">Boshlash</a>\n  </div>\n</section>'},
+        {"id": "form-bootstrap", "name": "Form (Bootstrap)", "category": "Bootstrap",
+         "code": '<form class="p-4">\n  <div class="mb-3"><label class="form-label">Email</label><input type="email" class="form-control" placeholder="email@example.com"></div>\n  <div class="mb-3"><label class="form-label">Parol</label><input type="password" class="form-control"></div>\n  <button type="submit" class="btn btn-primary">Yuborish</button>\n</form>'},
+        {"id": "nav-tailwind", "name": "Navbar (Tailwind)", "category": "Tailwind",
+         "code": '<nav class="bg-gray-800 p-4">\n  <div class="max-w-7xl mx-auto flex justify-between items-center">\n    <a href="#" class="text-white font-bold text-xl">Logo</a>\n    <div class="space-x-4"><a href="#" class="text-gray-300 hover:text-white">Bosh sahifa</a><a href="#" class="text-gray-300 hover:text-white">Haqida</a></div>\n  </div>\n</nav>'},
+        {"id": "card-tailwind", "name": "Card (Tailwind)", "category": "Tailwind",
+         "code": '<div class="max-w-sm rounded overflow-hidden shadow-lg bg-white">\n  <img class="w-full" src="https://via.placeholder.com/300x200" alt="">\n  <div class="px-6 py-4">\n    <div class="font-bold text-xl mb-2">Sarlavha</div>\n    <p class="text-gray-700 text-base">Tavsif matni.</p>\n  </div>\n  <div class="px-6 pt-4 pb-2"><span class="bg-gray-200 rounded-full px-3 py-1 text-sm font-semibold text-gray-700">#tag1</span></div>\n</div>'},
+        {"id": "hero-tailwind", "name": "Hero (Tailwind)", "category": "Tailwind",
+         "code": '<section class="bg-gradient-to-r from-purple-600 to-indigo-600 text-white py-20">\n  <div class="max-w-4xl mx-auto text-center">\n    <h1 class="text-5xl font-bold mb-4">Xush kelibsiz!</h1>\n    <p class="text-xl mb-8">Loyihangiz uchun zamonaviy dizayn.</p>\n    <a href="#" class="bg-white text-purple-600 px-8 py-3 rounded-full font-bold hover:bg-gray-100">Boshlash</a>\n  </div>\n</section>'},
+        {"id": "footer", "name": "Footer", "category": "Umumiy",
+         "code": '<footer style="background:#1a1a2e;color:#aaa;padding:30px 20px;text-align:center;margin-top:40px">\n  <p>&copy; 2025 Loyiha nomi. Barcha huquqlar himoyalangan.</p>\n  <div style="margin-top:10px"><a href="#" style="color:#7c6fff;margin:0 8px">GitHub</a><a href="#" style="color:#7c6fff;margin:0 8px">Telegram</a></div>\n</footer>'},
+        {"id": "grid-css", "name": "CSS Grid Layout", "category": "Umumiy",
+         "code": '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;padding:20px">\n  <div style="background:#1c2136;border-radius:8px;padding:20px;color:#fff">Block 1</div>\n  <div style="background:#1c2136;border-radius:8px;padding:20px;color:#fff">Block 2</div>\n  <div style="background:#1c2136;border-radius:8px;padding:20px;color:#fff">Block 3</div>\n</div>'},
+        {"id": "pricing", "name": "Pricing Table", "category": "Umumiy",
+         "code": '<div style="display:flex;gap:20px;justify-content:center;padding:40px;flex-wrap:wrap">\n  <div style="background:#1c2136;border:1px solid #252d45;border-radius:12px;padding:30px;width:250px;text-align:center;color:#fff"><h3>Bepul</h3><p style="font-size:2rem;font-weight:700;color:#7c6fff">$0</p><p style="color:#888">1 loyiha<br>100MB joy</p><button style="background:#7c6fff;color:#fff;border:none;padding:10px 24px;border-radius:6px;cursor:pointer;margin-top:12px">Tanlash</button></div>\n  <div style="background:#1c2136;border:2px solid #7c6fff;border-radius:12px;padding:30px;width:250px;text-align:center;color:#fff"><h3>Pro</h3><p style="font-size:2rem;font-weight:700;color:#22d3a0">$9</p><p style="color:#888">10 loyiha<br>5GB joy</p><button style="background:#22d3a0;color:#000;border:none;padding:10px 24px;border-radius:6px;cursor:pointer;margin-top:12px;font-weight:700">Tanlash</button></div>\n</div>'},
+    ]
+    return jsonify({"components": components})
+
+# ── Color Picker API ────────────────────────────────────────────────────────
+@app.route("/api/color/palette")
+@user_req
+def color_palette():
+    """Ranglar palitrasini qaytaradi."""
+    palettes = {
+        "Material": ["#F44336","#E91E63","#9C27B0","#673AB7","#3F51B5","#2196F3","#03A9F4","#00BCD4","#009688","#4CAF50","#8BC34A","#CDDC39","#FFEB3B","#FFC107","#FF9800","#FF5722"],
+        "Pastel": ["#FFB3BA","#FFDFBA","#FFFFBA","#BAFFC9","#BAE1FF","#E8BAFF","#FFC8DD","#BDE0FE","#A2D2FF","#CDB4DB"],
+        "Dark": ["#0d0f18","#161929","#1c2136","#252d45","#7c6fff","#22d3a0","#f05d5d","#f5c518","#5c6890","#d4daf0"],
+        "Gradient": ["linear-gradient(135deg,#667eea,#764ba2)","linear-gradient(135deg,#f093fb,#f5576c)","linear-gradient(135deg,#4facfe,#00f2fe)","linear-gradient(135deg,#43e97b,#38f9d7)","linear-gradient(135deg,#fa709a,#fee140)"],
+    }
+    return jsonify({"palettes": palettes})
+
+
+# ╔══════════════════════════════════════════════════════════════════════════╗
 # ║              BACKEND ENGINE — LOYIHA ICHIDAGI SERVERLESS FUNKSIYALAR     ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
 
@@ -4220,6 +5149,7 @@ def main():
     if not QRCODE_OK:
         print(_c("  ⚠  QR-kod uchun: pip install qrcode[pil]",Y))
     threading.Thread(target=expiry_checker,daemon=True).start()
+    threading.Thread(target=_uptime_checker,daemon=True).start()
     while True:
         print_menu()
         try:
