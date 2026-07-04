@@ -927,8 +927,6 @@ function copyText(t){{navigator.clipboard.writeText(t).then(()=>{{
       <!-- TAB BUTTONS -->
       <div style="display:flex;gap:4px;margin-bottom:12px;flex-wrap:wrap">
         <button onclick="showAITab('qa')" id="aiTabQA" style="flex:1;padding:6px;background:#7c6fff;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:.72rem;font-weight:600">📝 Savol-Javob</button>
-        <button onclick="showAITab('topic')" id="aiTabTOPIC" style="flex:1;padding:6px;background:#252d45;color:#5c6890;border:none;border-radius:6px;cursor:pointer;font-size:.72rem">📚 Mavzu</button>
-        <button onclick="showAITab('word')" id="aiTabWORD" style="flex:1;padding:6px;background:#252d45;color:#5c6890;border:none;border-radius:6px;cursor:pointer;font-size:.72rem">🔤 So'z</button>
         <button onclick="showAITab('badword')" id="aiTabBADWORD" style="flex:1;padding:6px;background:#252d45;color:#5c6890;border:none;border-radius:6px;cursor:pointer;font-size:.72rem">🚫 Filtr</button>
       </div>
       <!-- QA TAB -->
@@ -939,32 +937,12 @@ function copyText(t){{navigator.clipboard.writeText(t).then(()=>{{
         <div style="margin-bottom:8px"><label style="color:#5c6890;font-size:.74rem">Javob:</label>
           <textarea id="aiTrainA" rows="3" placeholder="python server.py buyrug'ini terminada yozing..."
             style="width:100%;padding:7px;background:#0d0f18;border:1px solid #252d45;border-radius:6px;color:#d4daf0;margin-top:3px;resize:vertical;font-size:.82rem"></textarea></div>
-        <div style="margin-bottom:8px"><label style="color:#5c6890;font-size:.74rem">Kategoriya (ixtiyoriy):</label>
-          <input type="text" id="aiTrainCat" placeholder="masalan: server, python, html"
-            style="width:100%;padding:7px;background:#0d0f18;border:1px solid #252d45;border-radius:6px;color:#d4daf0;margin-top:3px;font-size:.82rem"></div>
         <button onclick="trainAI('qa')" style="background:#7c6fff;color:#fff;border:none;border-radius:7px;padding:7px 14px;cursor:pointer;font-weight:600;font-size:.8rem">💾 Saqlash</button>
       </div>
-      <!-- TOPIC TAB -->
-      <div id="aiPanelTopic" style="display:none">
-        <p style="color:#5c6890;font-size:.74rem;margin-bottom:8px">Mavzu qo'shing. Foydalanuvchi "Python nima" yoki "nima Python" desa — ma'lumotni ko'rsatadi.</p>
-        <div style="margin-bottom:8px"><label style="color:#5c6890;font-size:.74rem">Mavzu nomi:</label>
-          <input type="text" id="aiTopicName" placeholder="Masalan: Python"
-            style="width:100%;padding:7px;background:#0d0f18;border:1px solid #252d45;border-radius:6px;color:#d4daf0;margin-top:3px;font-size:.82rem"></div>
-        <div style="margin-bottom:8px"><label style="color:#5c6890;font-size:.74rem">Ma'lumot:</label>
-          <textarea id="aiTopicInfo" rows="4" placeholder="Python — dasturlash tili bo'lib, veb, sun'iy intellekt va boshqa sohalarda ishlatiladi..."
-            style="width:100%;padding:7px;background:#0d0f18;border:1px solid #252d45;border-radius:6px;color:#d4daf0;margin-top:3px;resize:vertical;font-size:.82rem"></textarea></div>
-        <button onclick="trainAI('topic')" style="background:#22d3a0;color:#000;border:none;border-radius:7px;padding:7px 14px;cursor:pointer;font-weight:600;font-size:.8rem">📚 Mavzu saqlash</button>
-      </div>
-      <!-- WORD TAB -->
-      <div id="aiPanelWord" style="display:none">
-        <p style="color:#5c6890;font-size:.74rem;margin-bottom:8px">Savol so'zlari qo'shing. AI "nima", "qanday" kabi so'zlarni savol belgisi sifatida tushunadi.</p>
-        <div style="display:flex;gap:6px;margin-bottom:8px">
-          <input type="text" id="aiNewWord" placeholder="Yangi savol so'zi (masalan: qaerda)"
-            style="flex:1;padding:7px;background:#0d0f18;border:1px solid #252d45;border-radius:6px;color:#d4daf0;font-size:.82rem">
-          <button onclick="trainAI('word')" style="background:#f5c518;color:#000;border:none;border-radius:7px;padding:7px 12px;cursor:pointer;font-weight:600;font-size:.8rem">+ Qo'shish</button>
-        </div>
-        <div id="aiWordsList" style="display:flex;flex-wrap:wrap;gap:4px"></div>
-      </div>
+      <!-- TOPIC TAB (hidden but functional) -->
+      <div id="aiPanelTopic" style="display:none"></div>
+      <!-- WORD TAB (hidden but functional) -->
+      <div id="aiPanelWord" style="display:none"></div>
       <!-- BADWORD TAB -->
       <div id="aiPanelBadword" style="display:none">
         <p style="color:#5c6890;font-size:.74rem;margin-bottom:8px">Haqoratli so'zlarni qo'shing. Foydalanuvchi bu so'zlarni ishlatsa, siz belgilagan javob yuboriladi.</p>
@@ -5098,6 +5076,7 @@ def _ai_find_answer(question, username=""):
     q_lower = question.lower().strip()
     q_words = set(re.findall(r'\w+', q_lower))
     question_words = _load_question_words()
+    name = username or "foydalanuvchi"
 
     # ── Matematik amallar ──
     math_result = _ai_solve_math(question)
@@ -5109,6 +5088,17 @@ def _ai_find_answer(question, username=""):
     if game_result is not None:
         return game_result
 
+    # ── AI o'zi haqida ──
+    ai_about_patterns = [
+        r"sen\s*kim", r"siz\s*kim", r"kim\s*sen", r"kimsan",
+        r"o.?zi.?\s*haqida", r"o.?zing\s*haqida",
+        r"sen\s*nima", r"siz\s*nima.?siz",
+        r"qanday\s*(?:dastur|bot|ai|sun.?iy)",
+    ]
+    for pat in ai_about_patterns:
+        if re.search(pat, q_lower):
+            return f"Men — AI Yordamchi, mahalliy (offline) sun'iy intellekt bo'tman. 🤖\n\nMening xususiyatlarim:\n• Internetga ulanmasdan ishlayman\n• Bilim bazam ai_data/ papkasida saqlanadi\n• Matematik misollarni yechaman\n• O'yin o'ynay olaman\n• Siz o'rgatgan narsalarni eslab qolaman\n• {name}, siz menga yangi bilim qo'shishingiz mumkin!\n\nMen SrvManager platformasi uchun yaratilganman."
+
     # ── Ism haqida savollar ──
     name_patterns = [
         r"ism(?:ing|im|i)?\s*(?:nima|nim|ni|kim)",
@@ -5116,21 +5106,54 @@ def _ai_find_answer(question, username=""):
         r"seni?\s*(?:nima|nim)\s*deyishadi",
         r"(?:nima|nim)\s*(?:deb|dep)\s*(?:atashadi|chaqirishadi)",
         r"ism(?:ing)?\s*(?:bormi|ayt)",
+        r"oting\s*nima", r"nima\s*oting",
     ]
     for pat in name_patterns:
         if re.search(pat, q_lower):
-            return f"Mening ismim AI Yordamchi. Men sizga yordam berish uchun yaratilganman, {username or 'dustim'}! 🤖"
+            return f"Mening ismim **AI Yordamchi**. Men SrvManager platformasining sun'iy intellekt yordamchisiman. {name}, sizga doimo yordam berishga tayyorman! 🤖"
 
-    # ── Salomlashish ──
-    greetings = {"salom", "assalom", "assalomu", "hey", "hi", "hello", "hayrli"}
+    # ── Salomlashish (kengaytirilgan) ──
+    greetings = {"salom", "assalom", "assalomu", "hey", "hi", "hello", "hayrli",
+                 "xayrli", "salomlashish", "salom aleykum", "va aleykum",
+                 "yahshimisiz", "yaxshimisiz", "qalay", "qalaysiz", "tinchmi"}
     if q_words & greetings:
-        name_part = f", {username}" if username else ""
-        return f"Salom{name_part}! 👋 Men AI yordamchiman. Sizga qanday yordam bera olaman?"
+        import random
+        responses = [
+            f"Salom, {name}! 👋 Bugun sizga qanday yordam bera olaman?",
+            f"Assalomu alaykum, {name}! Men tayyorman — savolingizni bering!",
+            f"Salom-salom, {name}! 😊 Nima qilaylik bugun?",
+            f"Hey, {name}! Yaxshi kuningiz bo'lsin! Qanday yordam kerak?",
+            f"Assalomu alaykum, {name}! Xizmatingizdaman. 🤖",
+        ]
+        return random.choice(responses)
 
     # ── Rahmat ──
-    thanks = {"rahmat", "raxmat", "thanks", "thank", "tashakkur"}
+    thanks = {"rahmat", "raxmat", "thanks", "thank", "tashakkur", "katta rahmat", "minnatdor"}
     if q_words & thanks:
-        return f"Arzimaydi{', ' + username if username else ''}! Yana savollaringiz bo'lsa, bemalol so'rang. 😊"
+        import random
+        responses = [
+            f"Arzimaydi, {name}! Har doim xizmatingizdaman. 😊",
+            f"Marhamat, {name}! Yana savollaringiz bo'lsa — bemalol!",
+            f"Sizga yordam bera olganimdan xursandman, {name}! 🌟",
+        ]
+        return random.choice(responses)
+
+    # ── Xayrlashish ──
+    byes = {"hayr", "xayr", "ko'rishguncha", "bye", "goodbye", "salomat"}
+    if q_words & byes:
+        return f"Xayr, {name}! Yaxshi kuningiz bo'lsin! Kerak bo'lganda qaytib keling. 👋😊"
+
+    # ── Ahvol so'rash ──
+    mood_q = {"qalay", "qalaysiz", "yaxshi", "ahvol", "kayfiyat"}
+    if q_words & mood_q and len(q_words) <= 4:
+        return f"Rahmat so'raganingiz uchun, {name}! Men — dasturman, har doim a'lo holatdaman! 😄 Sizchi, qanday yordam kerak?"
+
+    # ── Nima qila olasan? ──
+    ability_patterns = [r"nima\s*qila\s*olasan", r"imkoniyat", r"funksiya", r"qanday.*yordam",
+                        r"nima\s*bilasan", r"nimalar.*mumkin"]
+    for pat in ability_patterns:
+        if re.search(pat, q_lower):
+            return f"Men quyidagilarni qila olaman, {name}:\n\n🧮 Matematik misollar yechish (2+2, 100/4, 2^10)\n🎮 O'yin o'ynash (tosh-qaychi-qogoz, latifa, tasodifiy son)\n📚 Savollaringizga javob berish (o'rgatilgan bilimlar asosida)\n💬 Suhbatlashish va salomlashish\n📝 Yangi bilim qabul qilish (O'qitish tugmasi)\n\nMenga savol bering yoki biror narsa o'rgating!"
 
     # ── Mavzu bo'yicha qidiruv: "(mavzu) nima" yoki "nima (mavzu)" ──
     topics = _load_ai_topics()
@@ -5148,7 +5171,7 @@ def _ai_find_answer(question, username=""):
     # ── Oddiy bilim bazasi bo'yicha qidiruv ──
     knowledge = _load_ai_knowledge()
     if not knowledge and not topics:
-        return "Hali men hech narsa bilmayman. Iltimos, avval meni o'rgating (📚 O'qitish tugmasi)."
+        return f"Salom, {name}! Men yangi AI yordamchiman. 🤖 Hozircha bilim bazam bo'sh, lekin siz menga o'rgatishingiz mumkin!\n\n📚 O'qitish tugmasini bosing va savol-javob qo'shing.\n\nShu orada: 🧮 Matematik misollar yecha olaman (2+2, 10*5)\n🎮 O'yin o'ynay olaman (tosh, latifa)"
 
     best_score = 0
     best_answer = None
@@ -5172,7 +5195,7 @@ def _ai_find_answer(question, username=""):
     if best_score >= 25 and best_answer:
         return best_answer
 
-    return f"Bu savolga javob topilmadi. 📚 O'qitish tugmasi orqali menga yangi ma'lumot bering.\n\nSiz so'radingiz: \"{question}\""
+    return f"Hmm, {name}, bu savolga hozircha javobim yo'q. 🤔\n\n📚 O'qitish tugmasi orqali menga yangi bilim bering!\n\nYoki quyilarni sinab ko'ring:\n• Matematik: 2+2, 100/4\n• O'yin: tosh, latifa\n• Savol: isming nima?"
 
 # ── API endpointlari ──────────────────────────────────────────────────────
 @app.route("/api/ai/ask", methods=["POST"])
