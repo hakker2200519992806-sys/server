@@ -740,6 +740,7 @@ def _pg(title, body, act="dash", flash=None, ftype="ok"):
         {_nav('/admin/blocked','🚫 Bloklangan IP','blocked'==act)}
         {_nav('/admin/bandwidth','📊 Bandwidth','bw'==act)}
         {_nav('/admin/monitor','📟 Monitoring','monitor'==act)}
+        {_nav('/admin/backend/logs','🐍 Backend','backend'==act)}
         {_nav('/admin/settings','⚙️ Sozlamalar','settings'==act)}"""
     rb = f'<span class="bx {"xg" if adm else "xb"}">{role}</span>'
     return f"""<!DOCTYPE html>
@@ -1452,6 +1453,7 @@ li.CodeMirror-hint-active{background:#7c6fff !important;color:#fff !important}
   <button class="btn bgh bsm" onclick="toggleConsole()">🖥 Konsol</button>
   <button class="btn bgh bsm" onclick="openSnippets()">✨ Snippetlar</button>
   <button class="btn bgh bsm" onclick="openHistory()">🕘 Tarix</button>
+  <button class="btn bgh bsm" onclick="openBackendPanel()">🐍 Backend</button>
   <a href="/projects/download/UUID" class="btn bgh bsm">⬇ ZIP</a>
   <span class="khint" title="Emmet: div.foo#bar, ul>li*3, div+p, (div>p)*2, a{Matn} kabi qisqartmalarni yozib Tab yoki Enter bosing&#10;CSS: w100%, h50vh, m10-20, p0, df, jcc, aic, fxd, tac kabi qisqartmalar ham qo'llab-quvvatlanadi&#10;Ctrl+Space — takliflar ro'yxati&#10;Ctrl+P — Quick Open&#10;Ctrl+Shift+F — global qidiruv&#10;Ctrl+S — saqlash&#10;Ctrl+Enter — ishga tushirish&#10;Ctrl+/ — izohga olish&#10;Shift+Alt+F — formatlash&#10;Alt+Click — qo'shimcha kursor (multi-cursor)&#10;O'ng tugma — fayl daraxtida yangi fayl/papka/nomini o'zgartirish/o'chirish&#10;Sudrab tashlash — faylni boshqa papkaga ko'chirish">⌨ Tugmalar</span>
   <a href="/projects" class="btn bgh bsm">← Loyihalar</a>
@@ -1524,6 +1526,21 @@ li.CodeMirror-hint-active{background:#7c6fff !important;color:#fff !important}
   </div>
   <div class="modalList" id="snpList"></div>
   <div style="padding:10px 14px"><button class="btn bgh bsm" onclick="closeModal('snippetsBg')">Yopish</button></div>
+</div></div>
+
+<div class="modalBg" id="backendBg"><div class="modalBox" style="max-width:640px">
+  <div style="padding:12px 14px;border-bottom:1px solid var(--brd)"><b style="color:#fff">🐍 Backend route'lari</b></div>
+  <div style="padding:12px 14px">
+    <div class="g g3">
+      <select id="beMethod"><option>GET</option><option>POST</option><option>PUT</option><option>DELETE</option></select>
+      <input type="text" id="bePath" placeholder="Yo'l (masalan: hello)">
+      <button class="btn bp bsm" onclick="addBackendRoute()">+ Qo'shish</button>
+    </div>
+    <textarea id="beCode" placeholder="Python kod. Kirish: request, query, body. Natija: result = ..." style="width:100%;min-height:90px;margin-top:8px;background:var(--bg);border:1px solid var(--brd);color:var(--tx);border-radius:7px;padding:8px;font-family:monospace"></textarea>
+    <p class="khint mt">Chaqiruv manzili: <code>/api/run/UUID/&lt;yo'l&gt;</code> — kirish: <code>request</code>, <code>query</code>, <code>body</code>; natijani <code>result</code> o'zgaruvchisiga yozing.</p>
+  </div>
+  <div class="modalList" id="beList"></div>
+  <div style="padding:10px 14px"><button class="btn bgh bsm" onclick="closeModal('backendBg')">Yopish</button></div>
 </div></div>
 
 <div class="modalBg" id="historyBg"><div class="modalBox">
@@ -2624,6 +2641,66 @@ function openHistory(){
 }
 
 /* ══════════════════════════════════════════════════════════════════════
+   BACKEND ROUTE'LAR (loyiha ichidagi mini-serverless funksiyalar)
+   ══════════════════════════════════════════════════════════════════════ */
+var beRoutes = [];
+
+function openBackendPanel(){
+  document.getElementById('backendBg').style.display = 'flex';
+  beRefresh();
+}
+function beRefresh(){
+  authFetch('/editor/backend/UUID').then(function(r){return r.json();}).then(function(d){
+    beRoutes = d.routes || [];
+    renderBackendList();
+  });
+}
+function renderBackendList(){
+  var list = document.getElementById('beList');
+  list.innerHTML = '';
+  beRoutes.forEach(function(r){
+    var row = document.createElement('div');
+    row.className = 'modalRow';
+    row.innerHTML = '<span>['+r.method+'] /'+r.path+' '+(r.is_enabled?'':'<small>(o\\'chirilgan)</small>')+'</span>'+
+      '<span class="fl"><button class="btn bgh bsm" data-t="tog">'+(r.is_enabled?'⏸':'▶️')+'</button>'+
+      '<button class="btn br bsm" data-t="del">🗑</button></span>';
+    row.querySelectorAll('button')[0].onclick = function(){ toggleBackendRoute(r.id, !r.is_enabled); };
+    row.querySelectorAll('button')[1].onclick = function(){ deleteBackendRoute(r.id); };
+    list.appendChild(row);
+  });
+  if (!beRoutes.length) list.innerHTML = '<div class="modalRow"><small>Hali backend route yo\\'q</small></div>';
+}
+function addBackendRoute(){
+  var method = document.getElementById('beMethod').value;
+  var path = document.getElementById('bePath').value.trim();
+  var code = document.getElementById('beCode').value;
+  if (!path){ flash('⚠ Yo\\'l kiriting','yl'); return; }
+  authFetch('/editor/backend/UUID',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({path:path,method:method,code:code})
+  }).then(function(r){return r.json();}).then(function(d){
+    if (d.ok){
+      document.getElementById('bePath').value=''; document.getElementById('beCode').value='';
+      beRefresh(); flash('✓ Route qo\\'shildi','gr');
+    } else flash('✗ '+(d.error||'Xato'),'rd');
+  });
+}
+function toggleBackendRoute(id, enabled){
+  authFetch('/editor/backend/UUID/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({is_enabled:enabled})
+  }).then(function(r){return r.json();}).then(function(){ beRefresh(); });
+}
+function deleteBackendRoute(id){
+  if (!confirm('Route o\\'chirilsinmi?')) return;
+  authFetch('/editor/backend/UUID/'+id,{method:'DELETE'}).then(function(r){return r.json();}).then(function(){ beRefresh(); });
+}
+document.addEventListener('DOMContentLoaded', function(){
+  var bg = document.getElementById('backendBg');
+  if (bg) bg.addEventListener('click', function(e){
+    if (e.target.id === 'backendBg') closeModal('backendBg');
+  });
+});
+
+/* ══════════════════════════════════════════════════════════════════════
    INITSIALIZATSIYA
    ══════════════════════════════════════════════════════════════════════ */
 document.addEventListener('DOMContentLoaded', function(){
@@ -3402,6 +3479,7 @@ def admin_settings():
         <button class="btn br bsm">🗑 Bekor qilish</button></form></td></tr>""" for k in api_keys)
     body = f"""
     <h2 style="color:#fff;margin-bottom:14px">⚙️ Sozlamalar</h2>
+    <a href="/admin/backend/logs" class="btn bgh bsm">🐍 Backend loglari</a>
     <div class="card"><h3>🔔 Telegram bildirishnomalar / 2FA</h3>
       <p class="tm mb" style="font-size:.79rem">Yangi login, bloklangan IP, ro'yxatdan o'tish, fayl yuklash va 2FA tasdiqlash kodlari uchun.
       Bot yaratish uchun @BotFather ga, chat ID olish uchun @userinfobot ga yozing. Har bir foydalanuvchi
