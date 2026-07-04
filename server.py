@@ -1483,6 +1483,7 @@ li.CodeMirror-hint-active{background:#7c6fff !important;color:#fff !important}
   <button class="btn bgh bsm" onclick="openSnippets()">✨ Snippetlar</button>
   <button class="btn bgh bsm" onclick="openHistory()">🕘 Tarix</button>
   <button class="btn bgh bsm" onclick="openBackendPanel()">🐍 Backend</button>
+  <button class="btn bgh bsm" onclick="openHelpPanel()">❓ Yordam</button>
   <a href="/projects/download/UUID" class="btn bgh bsm">⬇ ZIP</a>
   <span class="khint" title="Emmet: div.foo#bar, ul>li*3, div+p, (div>p)*2, a{Matn} kabi qisqartmalarni yozib Tab yoki Enter bosing&#10;CSS: w100%, h50vh, m10-20, p0, df, jcc, aic, fxd, tac kabi qisqartmalar ham qo'llab-quvvatlanadi&#10;Ctrl+Space — takliflar ro'yxati&#10;Ctrl+P — Quick Open&#10;Ctrl+Shift+F — global qidiruv&#10;Ctrl+S — saqlash&#10;Ctrl+Enter — ishga tushirish&#10;Ctrl+/ — izohga olish&#10;Shift+Alt+F — formatlash&#10;Alt+Click — qo'shimcha kursor (multi-cursor)&#10;O'ng tugma — fayl daraxtida yangi fayl/papka/nomini o'zgartirish/o'chirish&#10;Sudrab tashlash — faylni boshqa papkaga ko'chirish">⌨ Tugmalar</span>
   <a href="/projects" class="btn bgh bsm">← Loyihalar</a>
@@ -1541,6 +1542,104 @@ li.CodeMirror-hint-active{background:#7c6fff !important;color:#fff !important}
     <button class="btn bgh bsm mla" onclick="closeModal('globalSearchBg')">Yopish</button>
   </div>
   <div class="modalList" id="gsResults"></div>
+</div></div>
+
+<div class="modalBg" id="helpBg"><div class="modalBox" style="max-width:720px;max-height:85vh">
+  <div style="padding:12px 14px;border-bottom:1px solid var(--brd);display:flex;align-items:center;justify-content:space-between">
+    <b style="color:#fff">❓ Emmet qisqartmalari va klaviatura tugmalari</b>
+    <button class="btn bgh bsm" onclick="closeModal('helpBg')">✕</button>
+  </div>
+  <div class="modalList" style="padding:14px;overflow-y:auto;font-size:.82rem;line-height:1.7">
+
+    <h3 style="color:var(--ac);margin-bottom:8px">⌨️ Klaviatura tugmalari</h3>
+    <table style="width:100%;margin-bottom:18px"><tbody>
+      <tr><td style="color:var(--gr);width:180px"><kbd>Tab</kbd></td><td>Emmet/Snippet kengaytirish</td></tr>
+      <tr><td style="color:var(--gr)"><kbd>Ctrl+S</kbd></td><td>Saqlash</td></tr>
+      <tr><td style="color:var(--gr)"><kbd>Ctrl+Enter</kbd></td><td>Ishga tushirish (Run)</td></tr>
+      <tr><td style="color:var(--gr)"><kbd>Ctrl+Space</kbd></td><td>Takliflar ro'yxati (Autocomplete)</td></tr>
+      <tr><td style="color:var(--gr)"><kbd>Ctrl+P</kbd></td><td>Quick Open — fayl qidirish</td></tr>
+      <tr><td style="color:var(--gr)"><kbd>Ctrl+Shift+F</kbd></td><td>Global qidiruv / almashtirish</td></tr>
+      <tr><td style="color:var(--gr)"><kbd>Ctrl+/</kbd></td><td>Izohga olish / izohdan chiqarish</td></tr>
+      <tr><td style="color:var(--gr)"><kbd>Shift+Alt+F</kbd></td><td>Kodni formatlash (beautify)</td></tr>
+      <tr><td style="color:var(--gr)"><kbd>Alt+Click</kbd></td><td>Ko'p kursor (multi-cursor)</td></tr>
+    </tbody></table>
+
+    <h3 style="color:var(--ac);margin-bottom:8px">🌐 HTML Emmet qisqartmalari</h3>
+    <p style="color:var(--mt);margin-bottom:8px">Qisqartmani yozib <kbd>Tab</kbd> yoki <kbd>Enter</kbd> bosing:</p>
+    <table style="width:100%;margin-bottom:18px"><tbody>
+      <tr><td style="color:var(--yl);width:200px"><code>!</code></td><td>HTML5 to'liq shablon (boilerplate)</td></tr>
+      <tr><td style="color:var(--yl)"><code>div.box#main</code></td><td>&lt;div class="box" id="main"&gt;&lt;/div&gt;</td></tr>
+      <tr><td style="color:var(--yl)"><code>ul>li*5</code></td><td>ul ichida 5 ta li elementi</td></tr>
+      <tr><td style="color:var(--yl)"><code>nav>ul>li*4>a</code></td><td>Navigatsiya tuzilmasi</td></tr>
+      <tr><td style="color:var(--yl)"><code>div+p+span</code></td><td>Bir xil darajada 3 ta element</td></tr>
+      <tr><td style="color:var(--yl)"><code>(div>p)*3</code></td><td>Guruhni 3 marta takrorlash</td></tr>
+      <tr><td style="color:var(--yl)"><code>a[href=#]{Havola}</code></td><td>Atributli va matnli element</td></tr>
+      <tr><td style="color:var(--yl)"><code>div.item$*4</code></td><td>item1, item2, item3, item4 klasslar</td></tr>
+      <tr><td style="color:var(--yl)"><code>lorem</code> / <code>lorem30</code></td><td>Lorem ipsum matn (30 so'z)</td></tr>
+      <tr><td style="color:var(--yl)"><code>img</code></td><td>&lt;img src="" alt=""&gt;</td></tr>
+      <tr><td style="color:var(--yl)"><code>input</code></td><td>&lt;input type="text"&gt;</td></tr>
+      <tr><td style="color:var(--yl)"><code>link</code></td><td>&lt;link rel="stylesheet" href=""&gt;</td></tr>
+      <tr><td style="color:var(--yl)"><code>html5</code> / <code>com</code></td><td>HTML5 shablon / izoh bloki</td></tr>
+    </tbody></table>
+
+    <h3 style="color:var(--ac);margin-bottom:8px">🎨 CSS Emmet qisqartmalari</h3>
+    <p style="color:var(--mt);margin-bottom:8px">CSS faylda qisqartmani yozib <kbd>Tab</kbd> bosing:</p>
+    <table style="width:100%;margin-bottom:18px"><tbody>
+      <tr><td style="color:var(--yl);width:200px"><code>w100%</code></td><td>width: 100%;</td></tr>
+      <tr><td style="color:var(--yl)"><code>h50vh</code></td><td>height: 50vh;</td></tr>
+      <tr><td style="color:var(--yl)"><code>m10</code> / <code>m10-20</code></td><td>margin: 10px; / margin: 10px 20px;</td></tr>
+      <tr><td style="color:var(--yl)"><code>p0</code></td><td>padding: 0;</td></tr>
+      <tr><td style="color:var(--yl)"><code>mt15</code> / <code>mb20</code></td><td>margin-top: 15px; / margin-bottom: 20px;</td></tr>
+      <tr><td style="color:var(--yl)"><code>fs16</code></td><td>font-size: 16px;</td></tr>
+      <tr><td style="color:var(--yl)"><code>fw700</code></td><td>font-weight: 700;</td></tr>
+      <tr><td style="color:var(--yl)"><code>lh1.5</code></td><td>line-height: 1.5;</td></tr>
+      <tr><td style="color:var(--yl)"><code>df</code> / <code>flex</code></td><td>display: flex;</td></tr>
+      <tr><td style="color:var(--yl)"><code>dg</code> / <code>grid</code></td><td>display: grid;</td></tr>
+      <tr><td style="color:var(--yl)"><code>jcc</code></td><td>justify-content: center;</td></tr>
+      <tr><td style="color:var(--yl)"><code>aic</code></td><td>align-items: center;</td></tr>
+      <tr><td style="color:var(--yl)"><code>fxd</code> / <code>fxdc</code></td><td>flex-direction: column;</td></tr>
+      <tr><td style="color:var(--yl)"><code>fxww</code></td><td>flex-wrap: wrap;</td></tr>
+      <tr><td style="color:var(--yl)"><code>center</code></td><td>display:flex; align-items:center; justify-content:center;</td></tr>
+      <tr><td style="color:var(--yl)"><code>tac</code></td><td>text-align: center;</td></tr>
+      <tr><td style="color:var(--yl)"><code>brr</code></td><td>border-radius:;</td></tr>
+      <tr><td style="color:var(--yl)"><code>op</code></td><td>opacity:;</td></tr>
+      <tr><td style="color:var(--yl)"><code>cur</code></td><td>cursor: pointer;</td></tr>
+      <tr><td style="color:var(--yl)"><code>trs</code></td><td>transition:;</td></tr>
+    </tbody></table>
+
+    <h3 style="color:var(--ac);margin-bottom:8px">📜 JavaScript Snippet qisqartmalari</h3>
+    <table style="width:100%;margin-bottom:18px"><tbody>
+      <tr><td style="color:var(--yl);width:200px"><code>fn</code></td><td>function nomi() { }</td></tr>
+      <tr><td style="color:var(--yl)"><code>af</code> / <code>anfn</code></td><td>() => { } (arrow function)</td></tr>
+      <tr><td style="color:var(--yl)"><code>cl</code> / <code>clg</code></td><td>console.log();</td></tr>
+      <tr><td style="color:var(--yl)"><code>ce</code></td><td>console.error();</td></tr>
+      <tr><td style="color:var(--yl)"><code>fori</code></td><td>for (let i = 0; i < .length; i++)</td></tr>
+      <tr><td style="color:var(--yl)"><code>forof</code></td><td>for (const item of ...)</td></tr>
+      <tr><td style="color:var(--yl)"><code>fe</code></td><td>.forEach(item => { })</td></tr>
+      <tr><td style="color:var(--yl)"><code>asf</code></td><td>async function() { }</td></tr>
+      <tr><td style="color:var(--yl)"><code>awt</code></td><td>await ...;</td></tr>
+      <tr><td style="color:var(--yl)"><code>qs</code></td><td>document.querySelector('');</td></tr>
+      <tr><td style="color:var(--yl)"><code>qsa</code></td><td>document.querySelectorAll('');</td></tr>
+      <tr><td style="color:var(--yl)"><code>addE</code></td><td>addEventListener('', () => { });</td></tr>
+      <tr><td style="color:var(--yl)"><code>setT</code> / <code>sto</code></td><td>setTimeout(() => { }, 1000);</td></tr>
+      <tr><td style="color:var(--yl)"><code>imp</code></td><td>import ... from '';</td></tr>
+      <tr><td style="color:var(--yl)"><code>exp</code></td><td>export default ...;</td></tr>
+      <tr><td style="color:var(--yl)"><code>ifj</code></td><td>if (...) { }</td></tr>
+    </tbody></table>
+
+    <h3 style="color:var(--ac);margin-bottom:8px">🖱️ Muharrir imkoniyatlari</h3>
+    <table style="width:100%"><tbody>
+      <tr><td style="color:var(--gr);width:200px">Fayl daraxti</td><td>O'ng tugma — yangi fayl/papka, nom o'zgartirish, o'chirish</td></tr>
+      <tr><td style="color:var(--gr)">Sudrab tashlash</td><td>Faylni boshqa papkaga ko'chirish (drag & drop)</td></tr>
+      <tr><td style="color:var(--gr)">Split view</td><td>⊞ Split tugmasi — ikki panelda bir vaqtda ishlash</td></tr>
+      <tr><td style="color:var(--gr)">Konsol</td><td>console.log() natijalarini ko'rish (🖥 Konsol)</td></tr>
+      <tr><td style="color:var(--gr)">Snippetlar</td><td>Shaxsiy qisqartmalar yaratish (✨ Snippetlar)</td></tr>
+      <tr><td style="color:var(--gr)">Tarix</td><td>Har saqlashda avtomatik snapshot — eski holatni tiklash</td></tr>
+      <tr><td style="color:var(--gr)">Formatlash</td><td>Shift+Alt+F yoki "Saqlashda formatlash" checkbox</td></tr>
+      <tr><td style="color:var(--gr)">Backend</td><td>Loyiha ichidagi Python serverless funksiyalar</td></tr>
+    </tbody></table>
+
+  </div>
 </div></div>
 
 <div class="modalBg" id="snippetsBg"><div class="modalBox">
@@ -2668,6 +2767,19 @@ function openHistory(){
       if (!(d.history||[]).length) list.innerHTML = '<div class="modalRow"><small>Tarix bo\\'sh</small></div>';
     });
 }
+
+/* ══════════════════════════════════════════════════════════════════════
+   YORDAM PANELI (Emmet qisqartmalari va tugmalar haqida)
+   ══════════════════════════════════════════════════════════════════════ */
+function openHelpPanel(){
+  document.getElementById('helpBg').style.display = 'flex';
+}
+document.addEventListener('DOMContentLoaded', function(){
+  var hbg = document.getElementById('helpBg');
+  if (hbg) hbg.addEventListener('click', function(e){
+    if (e.target.id === 'helpBg') closeModal('helpBg');
+  });
+});
 
 /* ══════════════════════════════════════════════════════════════════════
    BACKEND ROUTE'LAR (loyiha ichidagi mini-serverless funksiyalar)
