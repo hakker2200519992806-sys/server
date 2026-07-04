@@ -5008,7 +5008,185 @@ def _save_question_words(words):
     with open(AI_WORDS_FILE, "w", encoding="utf-8") as f:
         json.dump(words, f, ensure_ascii=False, indent=2)
 
-# ── Javob topish algoritmi ────────────────────────────────────────────────
+# ── HTML/CSS/Emmet bilim bazasi ────────────────────────────────────────────
+_HTML_TAGS = {
+    "div": ("Block konteyner element", "<div>Mazmun</div>", "Elementlarni guruhlash, layout yaratish uchun ishlatiladi"),
+    "span": ("Inline konteyner", "<span>matn</span>", "Matn ichida kichik qismni ajratish uchun"),
+    "p": ("Paragraf (abzats)", "<p>Matn</p>", "Matn paragraflarini yaratish uchun"),
+    "a": ("Havola (link)", '<a href="url">Matn</a>', "Boshqa sahifaga yoki manzilga havola yaratadi"),
+    "img": ("Rasm", '<img src="rasm.jpg" alt="tavsif">', "Sahifaga rasm qo'shadi. Yopiluvchi teg yo'q"),
+    "h1": ("1-darajali sarlavha", "<h1>Sarlavha</h1>", "Eng katta sarlavha. h1-h6 gacha bor"),
+    "h2": ("2-darajali sarlavha", "<h2>Sarlavha</h2>", "Ikkinchi darajali sarlavha"),
+    "h3": ("3-darajali sarlavha", "<h3>Sarlavha</h3>", "Uchinchi darajali sarlavha"),
+    "ul": ("Tartibsiz ro'yxat", "<ul><li>Element</li></ul>", "Nuqtali ro'yxat yaratadi"),
+    "ol": ("Tartibli ro'yxat", "<ol><li>Element</li></ol>", "Raqamli ro'yxat yaratadi"),
+    "li": ("Ro'yxat elementi", "<li>Element</li>", "ul yoki ol ichida ishlatiladi"),
+    "table": ("Jadval", "<table><tr><td>Katak</td></tr></table>", "Ma'lumotlarni jadval ko'rinishida ko'rsatadi"),
+    "tr": ("Jadval qatori", "<tr>...</tr>", "table ichida qator yaratadi"),
+    "td": ("Jadval katagi", "<td>Ma'lumot</td>", "tr ichida katak yaratadi"),
+    "th": ("Jadval sarlavha katagi", "<th>Sarlavha</th>", "Qalin va markazlashtirilgan katak"),
+    "form": ("Forma", '<form action="/url" method="POST">...</form>', "Foydalanuvchi kiritgan ma'lumotlarni yuborish uchun"),
+    "input": ("Kiritish maydoni", '<input type="text" name="ism">', "Matn, parol, checkbox va boshqa turlar"),
+    "button": ("Tugma", "<button>Bosish</button>", "Bosiladigan tugma yaratadi"),
+    "textarea": ("Ko'p qatorli matn", "<textarea>Matn</textarea>", "Katta matn kiritish maydoni"),
+    "select": ("Tanlash ro'yxati", "<select><option>1</option></select>", "Dropdown ro'yxat yaratadi"),
+    "nav": ("Navigatsiya", "<nav>Havolalar</nav>", "Sayt navigatsiyasi uchun semantik teg"),
+    "header": ("Sarlavha bo'limi", "<header>...</header>", "Sahifa yoki bo'lim sarlavhasi"),
+    "footer": ("Pastki bo'lim", "<footer>...</footer>", "Sahifa pastki qismi (muallif, havolalar)"),
+    "section": ("Bo'lim", "<section>...</section>", "Sahifani mantiqiy bo'limlarga ajratish"),
+    "article": ("Maqola", "<article>...</article>", "Mustaqil mazmunli bo'lim (blog post, yangilik)"),
+    "aside": ("Yon panel", "<aside>...</aside>", "Asosiy mazmun bilan bog'liq qo'shimcha ma'lumot"),
+    "main": ("Asosiy mazmun", "<main>...</main>", "Sahifaning asosiy mazmuni (bitta bo'lishi kerak)"),
+    "br": ("Qator uzish", "<br>", "Yangi qatorga o'tish. Yopiluvchi teg yo'q"),
+    "hr": ("Gorizontal chiziq", "<hr>", "Ajratuvchi gorizontal chiziq"),
+    "strong": ("Qalin matn", "<strong>Muhim</strong>", "Qalin va semantik jihatdan muhim matn"),
+    "em": ("Kursiv matn", "<em>Ta'kidlangan</em>", "Kursiv va ta'kidlangan matn"),
+    "code": ("Kod", "<code>let x = 5;</code>", "Dasturlash kodini ko'rsatish uchun"),
+    "pre": ("Formatlangan matn", "<pre>  bo'sh joy  </pre>", "Bo'sh joylar va qatorlar saqlanadi"),
+    "link": ("Tashqi resurs", '<link rel="stylesheet" href="style.css">', "CSS fayl ulash uchun head ichida"),
+    "script": ("JavaScript", '<script src="app.js"></script>', "JS kodni ulash yoki yozish uchun"),
+    "meta": ("Meta ma'lumot", '<meta charset="UTF-8">', "Sahifa haqida meta ma'lumot (head ichida)"),
+    "title": ("Sahifa nomi", "<title>Nomi</title>", "Brauzer tabida ko'rinadigan nom"),
+    "style": ("Ichki CSS", "<style>body{color:red}</style>", "HTML ichida CSS yozish uchun"),
+    "video": ("Video", '<video src="video.mp4" controls></video>', "Video o'ynatish uchun"),
+    "audio": ("Audio", '<audio src="audio.mp3" controls></audio>', "Musiqa/ovoz o'ynatish uchun"),
+    "iframe": ("Ichki ramka", '<iframe src="url"></iframe>', "Boshqa sahifani ichiga joylashtirish"),
+    "canvas": ("Grafik", '<canvas id="c"></canvas>', "JavaScript bilan rasm chizish uchun"),
+    "label": ("Yorliq", '<label for="id">Matn</label>', "input uchun nom/yorliq"),
+}
+
+_CSS_PROPS = {
+    "display": "Elementning ko'rinish turi: block, inline, flex, grid, none",
+    "flexbox": "display:flex; — elementlarni bir qatorda yoki ustunda joylashtirish. align-items, justify-content bilan boshqariladi",
+    "grid": "display:grid; — 2D tarmoq (setka) yaratish. grid-template-columns, grid-gap bilan boshqariladi",
+    "margin": "Tashqi bo'shliq. margin: 10px; yoki margin-top, margin-bottom, margin-left, margin-right",
+    "padding": "Ichki bo'shliq. padding: 10px; yoki padding-top, padding-bottom...",
+    "border": "Chegara. border: 1px solid #000; — qalinlik, tur, rang",
+    "border-radius": "Burchakni yumaloqlash. border-radius: 10px; yoki 50% (doira)",
+    "color": "Matn rangi. color: red; yoki color: #ff0000; yoki color: rgb(255,0,0);",
+    "background": "Fon. background: #fff; yoki background-image, background-color",
+    "font-size": "Matn o'lchami. font-size: 16px; yoki 1.2rem, 1.5em",
+    "font-weight": "Matn qalinligi. font-weight: bold; yoki 100-900 (400=normal, 700=bold)",
+    "text-align": "Matn joylashuvi. text-align: center/left/right/justify",
+    "position": "Joylashuv turi: static, relative, absolute, fixed, sticky",
+    "z-index": "Qatlam tartibi. Katta son = ustda ko'rinadi. position: relative/absolute bo'lishi kerak",
+    "width": "Kenglik. width: 100%; yoki 300px, 50vw",
+    "height": "Balandlik. height: 100vh; (viewport height), 200px",
+    "overflow": "Toshib ketgan mazmun. overflow: hidden/scroll/auto",
+    "opacity": "Shaffoflik. opacity: 0 (ko'rinmas) dan 1 (to'liq) gacha",
+    "transition": "Animatsiya. transition: all 0.3s ease; — o'zgarishlarni silliq qiladi",
+    "transform": "O'zgartirish. transform: rotate(45deg), scale(1.5), translate(10px,20px)",
+    "box-shadow": "Soya. box-shadow: 0 4px 12px rgba(0,0,0,0.2);",
+    "cursor": "Sichqoncha ko'rinishi. cursor: pointer (qo'l), default, text, move",
+}
+
+_EMMET_EXAMPLES = {
+    "div*10": "10 ta <div></div> yaratadi",
+    "div*5": "5 ta <div></div> yaratadi",
+    "ul>li*5": "<ul> ichida 5 ta <li></li> yaratadi",
+    "ul>li*3": "<ul> ichida 3 ta <li></li> yaratadi",
+    "nav>ul>li*4>a": "Navigatsiya: nav > ul > 4 ta li > har birida a tegi",
+    "div.box": '<div class="box"></div> yaratadi',
+    "div#main": '<div id="main"></div> yaratadi',
+    "div.box#main": '<div class="box" id="main"></div>',
+    "div.item$*3": '<div class="item1"></div>\n<div class="item2"></div>\n<div class="item3"></div>',
+    "h1+p+p": "<h1></h1>\n<p></p>\n<p></p> — bir xil darajada",
+    "div>p>span": "Ichma-ich: div > p > span",
+    "(div>p)*3": "Guruhni 3 marta: div>p, div>p, div>p",
+    "a[href=#]": '<a href="#"></a>',
+    'a{Havola}': '<a href="">Havola</a> — {} ichida matn',
+    "!": "HTML5 to'liq shablon (doctype, html, head, body)",
+    "img": '<img src="" alt=""> yaratadi (avtomatik atributlar)',
+    "input": '<input type="text"> yaratadi',
+    "link": '<link rel="stylesheet" href=""> yaratadi',
+    "div+p": "<div></div>\n<p></p> — qo'shni elementlar",
+    "div>p+span": "<div>\n  <p></p>\n  <span></span>\n</div>",
+    "table>tr*3>td*4": "3 qatorli, 4 ustunli jadval",
+    "form>input*3+button": "Forma: 3 ta input va 1 tugma",
+    "lorem": "30 so'zlik lorem ipsum matn",
+    "lorem10": "10 so'zlik lorem ipsum matn",
+    "div.container>header+main+footer": "Oddiy sahifa tuzilmasi",
+}
+
+def _ai_emmet_answer(q_lower, name):
+    """Emmet haqidagi savollarga javob."""
+    # Umumiy Emmet haqida
+    if re.search(r'emmet\s*(nima|nim|haqida|degan|bu)', q_lower) or q_lower.strip() == "emmet":
+        return f"✨ **Emmet** — HTML va CSS yozishni tezlashtiradigan qisqartmalar tizimi, {name}.\n\nMasalan:\n• `div.box` → `<div class=\"box\"></div>`\n• `ul>li*5` → ul ichida 5 ta li\n• `!` → to'liq HTML5 shablon\n• `div*10` → 10 ta div\n\n📝 Qisqartmani yozib **Tab** bosing — avtomatik kengayadi!\n\nBatafsil so'rang: \"div*10 nima qiladi\" yoki \"ul>li*3 kengaytmasi\""
+
+    # Aniq Emmet misol so'ralsa
+    for pattern, explanation in _EMMET_EXAMPLES.items():
+        # "div*10 nima" yoki "div*10 kengaytmasi" yoki shunchaki "div*10"
+        pat_escaped = re.escape(pattern).replace(r'\*', r'\*').replace(r'\$', r'\$')
+        if re.search(pat_escaped, q_lower):
+            return f"✨ **Emmet: `{pattern}`**\n\nNatija: {explanation}\n\nMuharrirda yozib **Tab** bosing!"
+
+    # Umumiy emmet patternni tushuntirish
+    emmet_q = re.search(r'([\w.#>\+\*\[\]\{\}\(\)\$\!]+)\s*(nima|nim|qiladi|kengayt|natija|yoz)', q_lower)
+    if emmet_q:
+        abbr = emmet_q.group(1)
+        # Oddiy Emmet qoidalarini tushuntirish
+        parts = []
+        if '*' in abbr:
+            parts.append(f"• `*N` — elementni N marta takrorlaydi")
+        if '>' in abbr:
+            parts.append(f"• `>` — ichma-ich (child) element yaratadi")
+        if '+' in abbr:
+            parts.append(f"• `+` — qo'shni (sibling) element yaratadi")
+        if '.' in abbr:
+            parts.append(f"• `.nom` — class atributi qo'shadi")
+        if '#' in abbr:
+            parts.append(f"• `#nom` — id atributi qo'shadi")
+        if '$' in abbr:
+            parts.append(f"• `$` — raqam qo'shadi (1, 2, 3...)")
+        if '(' in abbr:
+            parts.append(f"• `()` — guruh yaratadi")
+        if '[' in abbr:
+            parts.append(f"• `[attr=val]` — atribut qo'shadi")
+        if '{' in abbr:
+            parts.append(f"• `{{matn}}` — element ichiga matn qo'shadi")
+        if parts:
+            explanation = "\n".join(parts)
+            return f"✨ **Emmet: `{abbr}`**\n\nQoidalar:\n{explanation}\n\n📝 Muharrirda yozib **Tab** bosing!"
+
+    return None
+
+def _ai_html_answer(q_lower, name):
+    """HTML teglar haqidagi savollarga javob."""
+    # "div nima", "img tegi", "table qanday" kabi
+    for tag, (desc, example, detail) in _HTML_TAGS.items():
+        patterns = [
+            rf'\b{tag}\b\s*(nima|nim|teg|haqida|qanday|degan|vazifa|ishlatil)',
+            rf'(nima|nim|qanday)\s*(bu\s*)?\b{tag}\b',
+            rf'\b{tag}\b\s*teg',
+        ]
+        for pat in patterns:
+            if re.search(pat, q_lower):
+                return f"🌐 **`<{tag}>` — {desc}**\n\nMisol: `{example}`\n\n📖 {detail}"
+
+    # Umumiy HTML haqida
+    if re.search(r'html\s*(nima|nim|haqida|degan|bu|o.?rgan|ayt)', q_lower):
+        return f"🌐 **HTML** (HyperText Markup Language) — veb-sahifalar yaratish tili, {name}.\n\nAsosiy teglar:\n• `<div>` — block konteyner\n• `<p>` — paragraf\n• `<a>` — havola\n• `<img>` — rasm\n• `<h1>`-`<h6>` — sarlavhalar\n• `<ul>/<ol>` — ro'yxatlar\n• `<table>` — jadval\n• `<form>` — forma\n\nAniq teg haqida so'rang: \"div nima\" yoki \"img tegi\""
+
+    return None
+
+def _ai_css_answer(q_lower, name):
+    """CSS haqidagi savollarga javob."""
+    for prop, desc in _CSS_PROPS.items():
+        patterns = [
+            rf'\b{re.escape(prop)}\b\s*(nima|nim|haqida|qanday|degan|ishlatil|qiladi)',
+            rf'(nima|nim|qanday)\s*(bu\s*)?\b{re.escape(prop)}\b',
+        ]
+        for pat in patterns:
+            if re.search(pat, q_lower):
+                return f"🎨 **CSS: `{prop}`**\n\n{desc}"
+
+    # Umumiy CSS haqida
+    if re.search(r'css\s*(nima|nim|haqida|degan|bu|o.?rgan|ayt)', q_lower):
+        return f"🎨 **CSS** (Cascading Style Sheets) — HTML elementlarning ko'rinishini boshqaradi, {name}.\n\nAsosiy xususiyatlar:\n• `display` — ko'rinish turi (flex, grid, block)\n• `margin/padding` — tashqi/ichki bo'shliq\n• `color` — matn rangi\n• `background` — fon\n• `border` — chegara\n• `position` — joylashuv\n• `font-size` — matn o'lchami\n\nAniq xususiyat haqida so'rang: \"flexbox nima\" yoki \"margin padding\""
+
+    return None
+
 def _ai_solve_math(text):
     """Matematik ifodani hisoblashga urinadi. Xavfsiz eval."""
     # Matndan raqam va operatorlarni ajratib olish
@@ -5153,7 +5331,22 @@ def _ai_find_answer(question, username=""):
                         r"nima\s*bilasan", r"nimalar.*mumkin"]
     for pat in ability_patterns:
         if re.search(pat, q_lower):
-            return f"Men quyidagilarni qila olaman, {name}:\n\n🧮 Matematik misollar yechish (2+2, 100/4, 2^10)\n🎮 O'yin o'ynash (tosh-qaychi-qogoz, latifa, tasodifiy son)\n📚 Savollaringizga javob berish (o'rgatilgan bilimlar asosida)\n💬 Suhbatlashish va salomlashish\n📝 Yangi bilim qabul qilish (O'qitish tugmasi)\n\nMenga savol bering yoki biror narsa o'rgating!"
+            return f"Men quyidagilarni qila olaman, {name}:\n\n🧮 Matematik misollar yechish (2+2, 100/4, 2^10)\n🎮 O'yin o'ynash (tosh-qaychi-qogoz, latifa, tasodifiy son)\n📚 Savollaringizga javob berish (o'rgatilgan bilimlar asosida)\n💬 Suhbatlashish va salomlashish\n🌐 HTML teglar, CSS kodlar, Emmet qisqartmalar haqida gapirish\n📝 Yangi bilim qabul qilish (O'qitish tugmasi)\n\nMenga savol bering yoki biror narsa o'rgating!"
+
+    # ── Emmet qisqartmalari ──
+    emmet_result = _ai_emmet_answer(q_lower, name)
+    if emmet_result:
+        return emmet_result
+
+    # ── HTML teglar haqida ──
+    html_result = _ai_html_answer(q_lower, name)
+    if html_result:
+        return html_result
+
+    # ── CSS haqida ──
+    css_result = _ai_css_answer(q_lower, name)
+    if css_result:
+        return css_result
 
     # ── Mavzu bo'yicha qidiruv: "(mavzu) nima" yoki "nima (mavzu)" ──
     topics = _load_ai_topics()
@@ -5195,7 +5388,7 @@ def _ai_find_answer(question, username=""):
     if best_score >= 25 and best_answer:
         return best_answer
 
-    return f"Hmm, {name}, bu savolga hozircha javobim yo'q. 🤔\n\n📚 O'qitish tugmasi orqali menga yangi bilim bering!\n\nYoki quyilarni sinab ko'ring:\n• Matematik: 2+2, 100/4\n• O'yin: tosh, latifa\n• Savol: isming nima?"
+    return f"Hmm, {name}, bu savolga hozircha javobim yo'q. 🤔\n\n💡 Quyidagi mavzularda suhbatlashishimiz mumkin:\n• 🌐 HTML: \"div nima\", \"img tegi\", \"table qanday\"\n• 🎨 CSS: \"flexbox nima\", \"margin padding\", \"display\"\n• ✨ Emmet: \"div*10 nima\", \"ul>li*5\", \"emmet nima\"\n• 🧮 Matematik: 2+2, 100/4, (5+3)*2\n• 🎮 O'yin: tosh, latifa, son ber\n\n📚 Yoki O'qitish tugmasi orqali menga yangi bilim bering!"
 
 # ── API endpointlari ──────────────────────────────────────────────────────
 @app.route("/api/ai/ask", methods=["POST"])
