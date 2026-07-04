@@ -922,21 +922,50 @@ function copyText(t){{navigator.clipboard.writeText(t).then(()=>{{
         color:#f05d5d;border-radius:5px;padding:3px 8px;cursor:pointer">✕</button>
     </div>
     <div style="padding:14px;overflow-y:auto">
-      <p style="color:#5c6890;font-size:.79rem;margin-bottom:12px">Savol-javob juftliklarini qo'shib AI ni o'rgating.
-        AI shu ma'lumotlar asosida javob beradi. Barcha ma'lumotlar <code>ai_data/</code> papkasida saqlanadi.</p>
-      <div style="margin-bottom:10px"><label style="color:#5c6890;font-size:.76rem">Savol / kalit so'z:</label>
-        <input type="text" id="aiTrainQ" placeholder="Masalan: server qanday ishga tushadi?"
-          style="width:100%;padding:8px;background:#0d0f18;border:1px solid #252d45;border-radius:6px;color:#d4daf0;margin-top:4px"></div>
-      <div style="margin-bottom:10px"><label style="color:#5c6890;font-size:.76rem">Javob:</label>
-        <textarea id="aiTrainA" rows="4" placeholder="python server.py buyrug'ini terminada yozing..."
-          style="width:100%;padding:8px;background:#0d0f18;border:1px solid #252d45;border-radius:6px;color:#d4daf0;margin-top:4px;resize:vertical"></textarea></div>
-      <div style="margin-bottom:10px"><label style="color:#5c6890;font-size:.76rem">Kategoriya (ixtiyoriy):</label>
-        <input type="text" id="aiTrainCat" placeholder="masalan: server, python, html"
-          style="width:100%;padding:8px;background:#0d0f18;border:1px solid #252d45;border-radius:6px;color:#d4daf0;margin-top:4px"></div>
-      <button onclick="trainAI()" style="background:#7c6fff;color:#fff;border:none;border-radius:8px;
-        padding:8px 16px;cursor:pointer;font-weight:600;font-size:.82rem">💾 Saqlash</button>
-      <button onclick="loadAIKnowledge()" style="background:transparent;border:1px solid #252d45;color:#5c6890;border-radius:8px;
-        padding:8px 16px;cursor:pointer;font-size:.82rem;margin-left:8px">🔄 Yangilash</button>
+      <p style="color:#5c6890;font-size:.79rem;margin-bottom:12px">AI ni 3 xil usulda o'rgating.
+        Barcha ma'lumotlar <code>ai_data/</code> papkasida saqlanadi.</p>
+      <!-- TAB BUTTONS -->
+      <div style="display:flex;gap:4px;margin-bottom:12px">
+        <button onclick="showAITab('qa')" id="aiTabQA" style="flex:1;padding:6px;background:#7c6fff;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:.76rem;font-weight:600">📝 Savol-Javob</button>
+        <button onclick="showAITab('topic')" id="aiTabTopic" style="flex:1;padding:6px;background:#252d45;color:#5c6890;border:none;border-radius:6px;cursor:pointer;font-size:.76rem">📚 Mavzu+Ma'lumot</button>
+        <button onclick="showAITab('word')" id="aiTabWord" style="flex:1;padding:6px;background:#252d45;color:#5c6890;border:none;border-radius:6px;cursor:pointer;font-size:.76rem">🔤 Savol so'zi</button>
+      </div>
+      <!-- QA TAB -->
+      <div id="aiPanelQA">
+        <div style="margin-bottom:8px"><label style="color:#5c6890;font-size:.74rem">Savol / kalit so'z:</label>
+          <input type="text" id="aiTrainQ" placeholder="Masalan: server qanday ishga tushadi?"
+            style="width:100%;padding:7px;background:#0d0f18;border:1px solid #252d45;border-radius:6px;color:#d4daf0;margin-top:3px;font-size:.82rem"></div>
+        <div style="margin-bottom:8px"><label style="color:#5c6890;font-size:.74rem">Javob:</label>
+          <textarea id="aiTrainA" rows="3" placeholder="python server.py buyrug'ini terminada yozing..."
+            style="width:100%;padding:7px;background:#0d0f18;border:1px solid #252d45;border-radius:6px;color:#d4daf0;margin-top:3px;resize:vertical;font-size:.82rem"></textarea></div>
+        <div style="margin-bottom:8px"><label style="color:#5c6890;font-size:.74rem">Kategoriya (ixtiyoriy):</label>
+          <input type="text" id="aiTrainCat" placeholder="masalan: server, python, html"
+            style="width:100%;padding:7px;background:#0d0f18;border:1px solid #252d45;border-radius:6px;color:#d4daf0;margin-top:3px;font-size:.82rem"></div>
+        <button onclick="trainAI('qa')" style="background:#7c6fff;color:#fff;border:none;border-radius:7px;padding:7px 14px;cursor:pointer;font-weight:600;font-size:.8rem">💾 Saqlash</button>
+      </div>
+      <!-- TOPIC TAB -->
+      <div id="aiPanelTopic" style="display:none">
+        <p style="color:#5c6890;font-size:.74rem;margin-bottom:8px">Mavzu qo'shing. Foydalanuvchi "Python nima" yoki "nima Python" desa — ma'lumotni ko'rsatadi.</p>
+        <div style="margin-bottom:8px"><label style="color:#5c6890;font-size:.74rem">Mavzu nomi:</label>
+          <input type="text" id="aiTopicName" placeholder="Masalan: Python"
+            style="width:100%;padding:7px;background:#0d0f18;border:1px solid #252d45;border-radius:6px;color:#d4daf0;margin-top:3px;font-size:.82rem"></div>
+        <div style="margin-bottom:8px"><label style="color:#5c6890;font-size:.74rem">Ma'lumot:</label>
+          <textarea id="aiTopicInfo" rows="4" placeholder="Python — dasturlash tili bo'lib, veb, sun'iy intellekt va boshqa sohalarda ishlatiladi..."
+            style="width:100%;padding:7px;background:#0d0f18;border:1px solid #252d45;border-radius:6px;color:#d4daf0;margin-top:3px;resize:vertical;font-size:.82rem"></textarea></div>
+        <button onclick="trainAI('topic')" style="background:#22d3a0;color:#000;border:none;border-radius:7px;padding:7px 14px;cursor:pointer;font-weight:600;font-size:.8rem">📚 Mavzu saqlash</button>
+      </div>
+      <!-- WORD TAB -->
+      <div id="aiPanelWord" style="display:none">
+        <p style="color:#5c6890;font-size:.74rem;margin-bottom:8px">Savol so'zlari qo'shing. AI "nima", "qanday" kabi so'zlarni savol belgisi sifatida tushunadi.</p>
+        <div style="display:flex;gap:6px;margin-bottom:8px">
+          <input type="text" id="aiNewWord" placeholder="Yangi savol so'zi (masalan: qaerda)"
+            style="flex:1;padding:7px;background:#0d0f18;border:1px solid #252d45;border-radius:6px;color:#d4daf0;font-size:.82rem">
+          <button onclick="trainAI('word')" style="background:#f5c518;color:#000;border:none;border-radius:7px;padding:7px 12px;cursor:pointer;font-weight:600;font-size:.8rem">+ Qo'shish</button>
+        </div>
+        <div id="aiWordsList" style="display:flex;flex-wrap:wrap;gap:4px"></div>
+      </div>
+      <button onclick="loadAIKnowledge()" style="background:transparent;border:1px solid #252d45;color:#5c6890;border-radius:7px;
+        padding:6px 12px;cursor:pointer;font-size:.78rem;margin-top:10px">🔄 Yangilash</button>
     </div>
     <div id="aiKnowledgeList" style="border-top:1px solid #252d45;overflow-y:auto;max-height:30vh;padding:8px"></div>
   </div>
@@ -994,26 +1023,76 @@ function addAIMsg(text,role){{
   msgs.scrollTop=msgs.scrollHeight;
 }}
 function formatAIMsg(t){{return t.replace(/\\n/g,'<br>').replace(/`([^`]+)`/g,'<code style="background:#252d45;padding:1px 4px;border-radius:3px">$1</code>');}}
-function trainAI(){{
-  var q=document.getElementById('aiTrainQ').value.trim();
-  var a=document.getElementById('aiTrainA').value.trim();
-  var cat=document.getElementById('aiTrainCat').value.trim();
-  if(!q||!a){{alert('Savol va javob majburiy!');return;}}
+function trainAI(type){{
+  var payload={{}};
+  if(type==='word'){{
+    var w=document.getElementById('aiNewWord').value.trim();
+    if(!w){{alert('So\\'z kiriting');return;}}
+    payload={{type:'word',word:w}};
+  }}else if(type==='topic'){{
+    var t=document.getElementById('aiTopicName').value.trim();
+    var info=document.getElementById('aiTopicInfo').value.trim();
+    if(!t||!info){{alert('Mavzu va ma\\'lumot majburiy!');return;}}
+    payload={{type:'topic',topic:t,info:info}};
+  }}else{{
+    var q=document.getElementById('aiTrainQ').value.trim();
+    var a=document.getElementById('aiTrainA').value.trim();
+    var cat=document.getElementById('aiTrainCat').value.trim();
+    if(!q||!a){{alert('Savol va javob majburiy!');return;}}
+    payload={{type:'qa',question:q,answer:a,category:cat}};
+  }}
   fetch('/api/ai/train',{{method:'POST',headers:{{'Content-Type':'application/json','X-CSRF-Token':'{get_csrf_token()}'}},
-    body:JSON.stringify({{question:q,answer:a,category:cat}})}}).then(r=>r.json()).then(d=>{{
-    if(d.ok){{document.getElementById('aiTrainQ').value='';document.getElementById('aiTrainA').value='';
-      document.getElementById('aiTrainCat').value='';loadAIKnowledge();alert('Saqlandi!');}}}});
+    body:JSON.stringify(payload)}}).then(r=>r.json()).then(d=>{{
+    if(d.ok){{
+      if(type==='word')document.getElementById('aiNewWord').value='';
+      else if(type==='topic'){{document.getElementById('aiTopicName').value='';document.getElementById('aiTopicInfo').value='';}}
+      else{{document.getElementById('aiTrainQ').value='';document.getElementById('aiTrainA').value='';document.getElementById('aiTrainCat').value='';}}
+      loadAIKnowledge();alert('✓ Saqlandi!');
+    }}else alert('✗ '+(d.error||'Xato'));
+  }});
+}}
+function showAITab(tab){{
+  ['qa','topic','word'].forEach(function(t){{
+    document.getElementById('aiPanel'+t.charAt(0).toUpperCase()+t.slice(1)).style.display=t===tab?'block':'none';
+    document.getElementById('aiTab'+t.toUpperCase()).style.background=t===tab?'#7c6fff':'#252d45';
+    document.getElementById('aiTab'+t.toUpperCase()).style.color=t===tab?'#fff':'#5c6890';
+  }});
 }}
 function loadAIKnowledge(){{
   fetch('/api/ai/knowledge').then(r=>r.json()).then(d=>{{
     var list=document.getElementById('aiKnowledgeList');
-    list.innerHTML=(d.items||[]).map(function(it){{
-      return '<div style="padding:6px 10px;border-bottom:1px solid #252d45;font-size:.78rem;display:flex;gap:8px;align-items:center"><span style="color:#7c6fff;flex:1">'+it.question+'</span><span style="color:#5c6890;font-size:.68rem">'+(it.category||'')+'</span><button onclick="deleteAIItem('+it.id+')" style="background:transparent;border:none;color:#f05d5d;cursor:pointer;font-size:.75rem">🗑</button></div>';
-    }}).join('')||'<p style="padding:12px;color:#5c6890;text-align:center;font-size:.78rem">Hali ma`lumot yoq</p>';
+    var html='';
+    // Savol so'zlari
+    if(d.words&&d.words.length){{
+      html+='<div style="padding:4px 8px"><span style="color:#f5c518;font-size:.7rem;font-weight:600">SAVOL SO\\'ZLARI:</span> ';
+      d.words.forEach(function(w){{html+='<span style="display:inline-block;background:#252d45;border-radius:4px;padding:2px 6px;margin:2px;font-size:.72rem;color:#d4daf0">'+w+' <span onclick="delAIWord(\\''+w+'\\')" style="color:#f05d5d;cursor:pointer;margin-left:3px">x</span></span>';}});
+      html+='</div>';
+    }}
+    // Mavzular
+    if(d.topics&&d.topics.length){{
+      html+='<div style="padding:4px 8px;border-top:1px solid #1c2136;margin-top:4px"><span style="color:#22d3a0;font-size:.7rem;font-weight:600">MAVZULAR:</span></div>';
+      d.topics.forEach(function(t){{
+        html+='<div style="padding:4px 10px;border-bottom:1px solid #1c2136;font-size:.76rem;display:flex;gap:6px;align-items:center"><span style="color:#22d3a0;font-weight:600">'+t.topic+'</span><span style="color:#5c6890;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+t.info.slice(0,50)+'</span><button onclick="delAITopic('+t.id+')" style="background:transparent;border:none;color:#f05d5d;cursor:pointer;font-size:.72rem">🗑</button></div>';
+      }});
+    }}
+    // Savol-javoblar
+    (d.items||[]).forEach(function(it){{
+      html+='<div style="padding:4px 10px;border-bottom:1px solid #1c2136;font-size:.76rem;display:flex;gap:6px;align-items:center"><span style="color:#7c6fff;flex:1">'+it.question+'</span><span style="color:#5c6890;font-size:.66rem">'+(it.category||'')+'</span><button onclick="deleteAIItem('+it.id+')" style="background:transparent;border:none;color:#f05d5d;cursor:pointer;font-size:.72rem">🗑</button></div>';
+    }});
+    list.innerHTML=html||'<p style="padding:12px;color:#5c6890;text-align:center;font-size:.78rem">Hali ma\\'lumot yoq</p>';
+    // Savol so'zlari tabini ham yangilash
+    var wl=document.getElementById('aiWordsList');
+    if(wl&&d.words){{wl.innerHTML=d.words.map(function(w){{return '<span style="background:#252d45;border-radius:4px;padding:3px 8px;font-size:.76rem;color:#d4daf0">'+w+'</span>';}}).join('');}}
   }});
 }}
 function deleteAIItem(id){{
   fetch('/api/ai/knowledge/'+id,{{method:'DELETE',headers:{{'X-CSRF-Token':'{get_csrf_token()}'}}}}).then(()=>loadAIKnowledge());
+}}
+function delAITopic(id){{
+  fetch('/api/ai/topics/'+id,{{method:'DELETE',headers:{{'X-CSRF-Token':'{get_csrf_token()}'}}}}).then(()=>loadAIKnowledge());
+}}
+function delAIWord(w){{
+  fetch('/api/ai/words/'+encodeURIComponent(w),{{method:'DELETE',headers:{{'X-CSRF-Token':'{get_csrf_token()}'}}}}).then(()=>loadAIKnowledge());
 }}
 </script>
 </body></html>"""
@@ -4822,9 +4901,52 @@ def _simple_md_to_html(text):
 AI_DATA_DIR = Path("ai_data")
 AI_DATA_DIR.mkdir(exist_ok=True)
 AI_KNOWLEDGE_FILE = AI_DATA_DIR / "knowledge.json"
+AI_TOPICS_FILE = AI_DATA_DIR / "topics.json"
+AI_WORDS_FILE = AI_DATA_DIR / "question_words.json"
+AI_BADWORDS_FILE = AI_DATA_DIR / "badwords.json"
 
+# ── Haqoratli so'zlar filtri ──────────────────────────────────────────────
+_DEFAULT_BADWORDS = [
+    "axmoq","tentak","eshak","hayvon","jinni","ablah","nodon",
+    "badnafs","iflos","murdor","harom","shayton",
+    "fuck","shit","damn","ass","bitch","idiot","stupid","dumb",
+    "bastard","moron","retard","nigga","nigger","whore","slut",
+]
+
+def _load_badwords():
+    if AI_BADWORDS_FILE.exists():
+        try:
+            with open(AI_BADWORDS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return _DEFAULT_BADWORDS
+
+def _save_badwords(words):
+    with open(AI_BADWORDS_FILE, "w", encoding="utf-8") as f:
+        json.dump(words, f, ensure_ascii=False, indent=2)
+
+def _contains_profanity(text):
+    """Matnda haqoratli so'z bor-yo'qligini tekshiradi (harflar orasidagi belgilarni ham aniqlaydi)."""
+    badwords = _load_badwords()
+    # Matnni tozalash: harflardan boshqa belgilarni olib tashlash
+    cleaned = re.sub(r'[^a-zA-Z0-9\u0400-\u04FF\u0600-\u06FF]', '', text.lower())
+    # Asl matn ham tekshiriladi
+    text_lower = text.lower()
+    for word in badwords:
+        word_clean = re.sub(r'[^a-zA-Z0-9\u0400-\u04FF\u0600-\u06FF]', '', word.lower())
+        if word_clean in cleaned:
+            return True
+        if word.lower() in text_lower:
+            return True
+        # Harflar orasiga belgi qo'yilgan holat: a.x.m.o.q, a-x-m-o-q
+        pattern = r'[^a-zA-Z\u0400-\u04FF]*'.join(re.escape(ch) for ch in word.lower())
+        if re.search(pattern, text_lower):
+            return True
+    return False
+
+# ── Bilim bazasi yuklash/saqlash ──────────────────────────────────────────
 def _load_ai_knowledge():
-    """ai_data/knowledge.json dan ma'lumotlarni yuklaydi."""
     if not AI_KNOWLEDGE_FILE.exists():
         return []
     try:
@@ -4834,23 +4956,92 @@ def _load_ai_knowledge():
         return []
 
 def _save_ai_knowledge(data):
-    """Ma'lumotlarni ai_data/knowledge.json ga saqlaydi."""
     with open(AI_KNOWLEDGE_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-def _ai_find_answer(question):
-    """Savol uchun eng yaxshi javobni topadi (kalit so'z moslik asosida)."""
-    knowledge = _load_ai_knowledge()
-    if not knowledge:
-        return "Hali men hech narsa bilmayman. Iltimos, avval meni o'rgating (📚 O'qitish tugmasi)."
+# ── Mavzular (topic + info) ──────────────────────────────────────────────
+def _load_ai_topics():
+    if not AI_TOPICS_FILE.exists():
+        return []
+    try:
+        with open(AI_TOPICS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+def _save_ai_topics(data):
+    with open(AI_TOPICS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+# ── Savol so'zlari (nima, qanday, ...) ───────────────────────────────────
+def _load_question_words():
+    if not AI_WORDS_FILE.exists():
+        defaults = ["nima", "qanday", "necha", "qachon", "kim", "qayerda", "nega", "qancha"]
+        _save_question_words(defaults)
+        return defaults
+    try:
+        with open(AI_WORDS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return ["nima", "qanday"]
+
+def _save_question_words(words):
+    with open(AI_WORDS_FILE, "w", encoding="utf-8") as f:
+        json.dump(words, f, ensure_ascii=False, indent=2)
+
+# ── Javob topish algoritmi ────────────────────────────────────────────────
+def _ai_find_answer(question, username=""):
+    """Savol uchun eng yaxshi javobni topadi."""
     q_lower = question.lower().strip()
     q_words = set(re.findall(r'\w+', q_lower))
+    question_words = _load_question_words()
+
+    # ── Ism haqida savollar ──
+    name_patterns = [
+        r"ism(?:ing|im|i)?\s*(?:nima|nim|ni|kim)",
+        r"(?:nima|nim|ni|kim)\s*(?:sen|siz|sani|sizni)?\s*ism",
+        r"seni?\s*(?:nima|nim)\s*deyishadi",
+        r"(?:nima|nim)\s*(?:deb|dep)\s*(?:atashadi|chaqirishadi)",
+        r"ism(?:ing)?\s*(?:bormi|ayt)",
+    ]
+    for pat in name_patterns:
+        if re.search(pat, q_lower):
+            return f"Mening ismim AI Yordamchi. Men sizga yordam berish uchun yaratilganman, {username or 'dustim'}! 🤖"
+
+    # ── Salomlashish ──
+    greetings = {"salom", "assalom", "assalomu", "hey", "hi", "hello", "hayrli"}
+    if q_words & greetings:
+        name_part = f", {username}" if username else ""
+        return f"Salom{name_part}! 👋 Men AI yordamchiman. Sizga qanday yordam bera olaman?"
+
+    # ── Rahmat ──
+    thanks = {"rahmat", "raxmat", "thanks", "thank", "tashakkur"}
+    if q_words & thanks:
+        return f"Arzimaydi{', ' + username if username else ''}! Yana savollaringiz bo'lsa, bemalol so'rang. 😊"
+
+    # ── Mavzu bo'yicha qidiruv: "(mavzu) nima" yoki "nima (mavzu)" ──
+    topics = _load_ai_topics()
+    for topic in topics:
+        topic_name = topic.get("topic", "").lower()
+        topic_words = set(re.findall(r'\w+', topic_name))
+        # Mavzu so'zlari savolda bormi?
+        if topic_words and topic_words.issubset(q_words):
+            # Va savol so'zi ham bormi?
+            has_qword = any(qw in q_words for qw in question_words)
+            # Yoki to'g'ridan-to'g'ri moslik
+            if has_qword or topic_name in q_lower:
+                return topic["info"]
+
+    # ── Oddiy bilim bazasi bo'yicha qidiruv ──
+    knowledge = _load_ai_knowledge()
+    if not knowledge and not topics:
+        return "Hali men hech narsa bilmayman. Iltimos, avval meni o'rgating (📚 O'qitish tugmasi)."
+
     best_score = 0
     best_answer = None
     for item in knowledge:
         item_q = item.get("question", "").lower()
         item_words = set(re.findall(r'\w+', item_q))
-        # Kalit so'z kategoriya qo'shish
         if item.get("category"):
             item_words.update(re.findall(r'\w+', item["category"].lower()))
         # To'g'ridan-to'g'ri moslik
@@ -4860,22 +5051,17 @@ def _ai_find_answer(question):
         common = q_words & item_words
         if common:
             score = len(common) / max(len(q_words), 1) * 100
-            # Uzun so'zlar uchun bonus
             score += sum(2 for w in common if len(w) > 3)
             if score > best_score:
                 best_score = score
                 best_answer = item["answer"]
+
     if best_score >= 25 and best_answer:
         return best_answer
-    # Umumiy javoblar
-    greetings = {"salom", "hey", "hi", "assalomu", "hello"}
-    if q_words & greetings:
-        return "Salom! Men AI yordamchiman. Sizga qanday yordam bera olaman?"
-    thanks = {"rahmat", "raxmat", "thanks", "thank"}
-    if q_words & thanks:
-        return "Arzimaydi! Yana savollaringiz bo'lsa, bemalol so'rang."
-    return f"Bu savolga javob topilmadi. Iltimos, 📚 O'qitish tugmasi orqali menga yangi ma'lumot bering.\n\nSiz so'radingiz: \"{question}\""
 
+    return f"Bu savolga javob topilmadi. 📚 O'qitish tugmasi orqali menga yangi ma'lumot bering.\n\nSiz so'radingiz: \"{question}\""
+
+# ── API endpointlari ──────────────────────────────────────────────────────
 @app.route("/api/ai/ask", methods=["POST"])
 @user_req
 def api_ai_ask():
@@ -4883,12 +5069,16 @@ def api_ai_ask():
     question = (d.get("question") or "").strip()
     if not question:
         return jsonify({"answer": "Savol bo'sh"})
-    answer = _ai_find_answer(question)
+    # Haqoratli so'z tekshiruvi
+    if _contains_profanity(question):
+        return jsonify({"answer": "⚠️ Iltimos, hurmatli muloqot qiling. Haqoratli so'zlar ishlatish mumkin emas."})
+    username = session.get("username", "")
+    answer = _ai_find_answer(question, username)
     # Log saqlash
     log_file = AI_DATA_DIR / "chat_log.jsonl"
     try:
         with open(log_file, "a", encoding="utf-8") as f:
-            f.write(json.dumps({"q": question, "a": answer[:100], "user": session.get("username", ""),
+            f.write(json.dumps({"q": question, "a": answer[:200], "user": username,
                                 "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}, ensure_ascii=False) + "\n")
     except Exception:
         pass
@@ -4898,30 +5088,57 @@ def api_ai_ask():
 @user_req
 def api_ai_train():
     d = request.get_json() or {}
-    question = (d.get("question") or "").strip()
-    answer = (d.get("answer") or "").strip()
-    category = (d.get("category") or "").strip()
-    if not question or not answer:
-        return jsonify({"ok": False, "error": "Savol va javob majburiy"})
-    knowledge = _load_ai_knowledge()
-    new_id = max([item.get("id", 0) for item in knowledge], default=0) + 1
-    knowledge.append({
-        "id": new_id,
-        "question": question,
-        "answer": answer,
-        "category": category,
-        "added_by": session.get("username", ""),
-        "added_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    })
-    _save_ai_knowledge(knowledge)
-    audit("ai_train", "knowledge", new_id, question[:80])
-    return jsonify({"ok": True, "id": new_id})
+    train_type = d.get("type", "qa")  # "qa", "topic", "word"
+    # Haqoratli so'z tekshiruvi
+    for field in ("question", "answer", "topic", "info", "word"):
+        val = d.get(field, "")
+        if val and _contains_profanity(val):
+            return jsonify({"ok": False, "error": "⚠️ Haqoratli so'zlar ishlatish mumkin emas!"})
+    if train_type == "word":
+        # Savol so'zi qo'shish
+        word = (d.get("word") or "").strip().lower()
+        if not word:
+            return jsonify({"ok": False, "error": "So'z kiriting"})
+        words = _load_question_words()
+        if word not in words:
+            words.append(word)
+            _save_question_words(words)
+        return jsonify({"ok": True, "words": words})
+    elif train_type == "topic":
+        # Mavzu + ma'lumot qo'shish
+        topic = (d.get("topic") or "").strip()
+        info = (d.get("info") or "").strip()
+        if not topic or not info:
+            return jsonify({"ok": False, "error": "Mavzu va ma'lumot majburiy"})
+        topics = _load_ai_topics()
+        new_id = max([t.get("id", 0) for t in topics], default=0) + 1
+        topics.append({"id": new_id, "topic": topic, "info": info,
+                       "added_by": session.get("username", ""), "added_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+        _save_ai_topics(topics)
+        audit("ai_train_topic", "topic", new_id, topic[:80])
+        return jsonify({"ok": True, "id": new_id})
+    else:
+        # Oddiy savol-javob
+        question = (d.get("question") or "").strip()
+        answer = (d.get("answer") or "").strip()
+        category = (d.get("category") or "").strip()
+        if not question or not answer:
+            return jsonify({"ok": False, "error": "Savol va javob majburiy"})
+        knowledge = _load_ai_knowledge()
+        new_id = max([item.get("id", 0) for item in knowledge], default=0) + 1
+        knowledge.append({"id": new_id, "question": question, "answer": answer, "category": category,
+                          "added_by": session.get("username", ""), "added_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+        _save_ai_knowledge(knowledge)
+        audit("ai_train", "knowledge", new_id, question[:80])
+        return jsonify({"ok": True, "id": new_id})
 
 @app.route("/api/ai/knowledge")
 @user_req
 def api_ai_knowledge():
     knowledge = _load_ai_knowledge()
-    return jsonify({"items": knowledge})
+    topics = _load_ai_topics()
+    words = _load_question_words()
+    return jsonify({"items": knowledge, "topics": topics, "words": words})
 
 @app.route("/api/ai/knowledge/<int:kid>", methods=["DELETE"])
 @user_req
@@ -4929,6 +5146,22 @@ def api_ai_knowledge_delete(kid):
     knowledge = _load_ai_knowledge()
     knowledge = [item for item in knowledge if item.get("id") != kid]
     _save_ai_knowledge(knowledge)
+    return jsonify({"ok": True})
+
+@app.route("/api/ai/topics/<int:tid>", methods=["DELETE"])
+@user_req
+def api_ai_topic_delete(tid):
+    topics = _load_ai_topics()
+    topics = [t for t in topics if t.get("id") != tid]
+    _save_ai_topics(topics)
+    return jsonify({"ok": True})
+
+@app.route("/api/ai/words/<word>", methods=["DELETE"])
+@user_req
+def api_ai_word_delete(word):
+    words = _load_question_words()
+    words = [w for w in words if w != word]
+    _save_question_words(words)
     return jsonify({"ok": True})
 
 
