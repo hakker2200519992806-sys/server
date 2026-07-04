@@ -20,9 +20,9 @@
 """
 
 import os, sys, re, json, time, uuid, socket, secrets, hashlib, threading
-import subprocess, platform, sqlite3, io, shutil, zipfile
+import subprocess, platform, sqlite3, io, shutil, zipfile, traceback
 import urllib.request, urllib.parse
-import backend_engine
+import multiprocessing as mp
 from datetime import datetime, timedelta
 from functools import wraps
 from pathlib import Path
@@ -64,6 +64,35 @@ try:
 except ImportError:
     QRCODE_OK = False
 
+# ── RestrictedPython — ixtiyoriy bog'liqlik (backend uchun) ────────────────
+try:
+    from RestrictedPython import compile_restricted, safe_globals
+    from RestrictedPython.Guards import (
+        safe_builtins, guarded_iter_unpack_sequence, full_write_guard,
+    )
+    from RestrictedPython.Eval import default_guarded_getiter
+    RESTRICTED_OK = True
+except ImportError:
+    RESTRICTED_OK = False
+
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║                 BACKEND ENGINE SOZLAMALARI                               ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+EXEC_TIMEOUT_SEC   = 3          # bir chaqiruv uchun maksimal ijro vaqti
+MEM_LIMIT_MB       = 128        # protsess uchun taxminiy xotira chegarasi (Linux)
+RATE_LIMIT_PER_MIN = 30         # foydalanuvchi/loyiha uchun daqiqasiga chaqiruv
+HISTORY_LOG_KEEP   = 500        # backend_exec_logs jadvalida saqlanadigan maksimal yozuv
+
+PROJECT_DB_DIR = Path("project_dbs")
+PROJECT_DB_DIR.mkdir(exist_ok=True)
+
+# Foydalanuvchi kodi ichida "import X" ga ruxsat etilgan modullar
+ALLOWED_IMPORTS = {"json", "math", "random", "re", "datetime", "string", "statistics"}
+
+# SQL darajasida taqiqlangan kalit so'zlar
+_SQL_FORBIDDEN = re.compile(
+    r"\b(ATTACH|DETACH|PRAGMA|VACUUM|DROP\s+DATABASE|LOAD_EXTENSION)\b", re.I)
+
 # ╔══════════════════════════════════════════════════════════════════════════╗
 # ║                          KONFIGURATSIYA                                  ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
@@ -80,7 +109,7 @@ CFG = {
     "MAX_FILE_MB":    50,
     "ALLOWED_EXT":    {".html",".css",".js",".txt",".json",".png",".jpg",
                        ".jpeg",".gif",".svg",".ico",".woff",".woff2",".ttf",
-                       ".mp3",".mp4"},
+                       ".mp3",".mp4",".py",".php"},
     "MAX_LOGIN_FAIL": 5,
     "BAN_MINUTES":    30,
     "SESSION_HOURS":  8,
@@ -281,7 +310,7 @@ def setup_db():
             used INTEGER DEFAULT 0,
             created_at TEXT DEFAULT (datetime('now')))""",
     ]
-    backend_engine.setup_backend_tables(db_exec, _ensure_column)
+    _setup_backend_tables()
     for s in stmts:
         db_exec(s, fetch=False)
 
@@ -3687,6 +3716,324 @@ def e404(e):
     <a href="/" class="btn bgh mt">← Asosiy</a></div></body></html>""",404
 
 # ╔══════════════════════════════════════════════════════════════════════════╗
+# ║              BACKEND ENGINE — LOYIHA ICHIDAGI SERVERLESS FUNKSIYALAR     ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+
+def project_db_path(puuid):
+    safe = re.sub(r"[^a-zA-Z0-9-]", "", puuid)
+    return PROJECT_DB_DIR / f"{safe}.db"
+
+def ensure_project_db(puuid):
+    p = project_db_path(puuid)
+    if not p.exists():
+        conn = sqlite3.connect(str(p))
+        conn.close()
+    return p
+
+class SafeDB:
+    """Foydalanuvchi kodiga beriladigan cheklangan SQL interfeysi."""
+    def __init__(self, db_path):
+        self._conn = sqlite3.connect(str(db_path), timeout=5)
+        self._conn.row_factory = sqlite3.Row
+        self._cur = self._conn.cursor()
+
+    def _check(self, sql):
+        if ";" in sql.strip().rstrip(";"):
+            raise ValueError("Bir chaqiruvda faqat bitta SQL buyrug'iga ruxsat")
+        if _SQL_FORBIDDEN.search(sql):
+            raise ValueError("Bu SQL buyrug'i taqiqlangan")
+
+    def execute(self, sql, params=()):
+        self._check(sql)
+        self._cur.execute(sql, tuple(params))
+        return self
+
+    def fetchone(self):
+        r = self._cur.fetchone()
+        return dict(r) if r else None
+
+    def fetchall(self):
+        return [dict(r) for r in self._cur.fetchall()]
+
+    def commit(self):
+        self._conn.commit()
+
+    def close(self):
+        try:
+            self._conn.commit()
+            self._conn.close()
+        except Exception:
+            pass
+
+def _guarded_import(name, *args, **kwargs):
+    root = name.split(".")[0]
+    if root not in ALLOWED_IMPORTS:
+        raise ImportError(f"'{name}' moduliga ruxsat yo'q (whitelist: {sorted(ALLOWED_IMPORTS)})")
+    return __import__(name, *args, **kwargs)
+
+def _build_restricted_globals():
+    g = dict(safe_globals)
+    g["__builtins__"] = dict(safe_builtins)
+    g["__builtins__"]["__import__"] = _guarded_import
+    g["_getiter_"] = default_guarded_getiter
+    g["_iter_unpack_sequence_"] = guarded_iter_unpack_sequence
+    g["_write_"] = full_write_guard
+    for name in ("len", "range", "enumerate", "zip", "sorted", "min", "max",
+                 "sum", "abs", "round", "isinstance", "str", "int", "float",
+                 "bool", "list", "dict", "set", "tuple"):
+        g["__builtins__"][name] = __builtins__[name] if isinstance(__builtins__, dict) else getattr(__builtins__, name)
+    return g
+
+def compile_user_code(code_str):
+    if not RESTRICTED_OK:
+        raise RuntimeError("RestrictedPython o'rnatilmagan: pip install RestrictedPython")
+    byte_code = compile_restricted(code_str, filename="<backend-handler>", mode="exec")
+    return byte_code
+
+def _child_worker(conn, code_str, request_json, db_path):
+    try:
+        import resource
+        resource.setrlimit(resource.RLIMIT_CPU, (EXEC_TIMEOUT_SEC + 1, EXEC_TIMEOUT_SEC + 1))
+        resource.setrlimit(resource.RLIMIT_AS, (MEM_LIMIT_MB * 1024 * 1024, MEM_LIMIT_MB * 1024 * 1024))
+    except Exception:
+        pass
+    db = None
+    try:
+        byte_code = compile_user_code(code_str)
+        ns = _build_restricted_globals()
+        exec(byte_code, ns)
+        handler = ns.get("handler")
+        if not callable(handler):
+            raise ValueError("Kodda `def handler(request_json, db):` funksiyasi topilmadi")
+        db = SafeDB(db_path)
+        result = handler(request_json, db)
+        json.dumps(result)
+        conn.send({"ok": True, "result": result})
+    except Exception as e:
+        conn.send({"ok": False, "error": f"{type(e).__name__}: {e}"})
+    finally:
+        if db:
+            db.close()
+        conn.close()
+
+def run_user_backend(code_str, request_json, db_path, timeout=EXEC_TIMEOUT_SEC):
+    t0 = time.time()
+    parent_conn, child_conn = mp.Pipe()
+    proc = mp.Process(target=_child_worker, args=(child_conn, code_str, request_json, str(db_path)))
+    proc.start()
+    proc.join(timeout)
+    duration_ms = int((time.time() - t0) * 1000)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(1)
+        if proc.is_alive():
+            proc.kill()
+        return False, f"Vaqt tugadi ({timeout}s ichida yakunlanmadi)", duration_ms
+    if parent_conn.poll():
+        data = parent_conn.recv()
+        if data.get("ok"):
+            return True, data.get("result"), duration_ms
+        return False, data.get("error", "Noma'lum xato"), duration_ms
+    return False, "Protsessdan javob kelmadi (kutilmagan xato)", duration_ms
+
+def _be_check_rate_limit(user_id):
+    cutoff = (datetime.now() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+    row = q1("SELECT COUNT(*) c FROM backend_rate_limit WHERE user_id=? AND called_at>?", (user_id, cutoff))
+    if row and row["c"] >= RATE_LIMIT_PER_MIN:
+        return False
+    db_exec("INSERT INTO backend_rate_limit (user_id) VALUES (?)", (user_id,), fetch=False)
+    return True
+
+def _be_log_exec(project_id, user_id, path, duration_ms, ok, error=""):
+    db_exec("INSERT INTO backend_exec_logs (project_id,user_id,path,duration_ms,ok,error) VALUES (?,?,?,?,?,?)",
+            (project_id, user_id, path, duration_ms, 1 if ok else 0, (error or "")[:500]), fetch=False)
+    old = db_exec("SELECT id FROM backend_exec_logs ORDER BY id DESC LIMIT -1 OFFSET ?", (HISTORY_LOG_KEEP,)) or []
+    for r in old:
+        db_exec("DELETE FROM backend_exec_logs WHERE id=?", (r["id"],), fetch=False)
+
+def _setup_backend_tables():
+    """Backend uchun kerakli jadvallarni yaratadi."""
+    be_stmts = [
+        """CREATE TABLE IF NOT EXISTS project_backend_routes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            path TEXT NOT NULL,
+            method TEXT DEFAULT 'GET',
+            code TEXT NOT NULL,
+            updated_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(project_id, path, method))""",
+        """CREATE TABLE IF NOT EXISTS backend_exec_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER,
+            user_id INTEGER,
+            path TEXT,
+            duration_ms INTEGER,
+            ok INTEGER,
+            error TEXT,
+            created_at TEXT DEFAULT (datetime('now')))""",
+        """CREATE TABLE IF NOT EXISTS backend_rate_limit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            called_at TEXT DEFAULT (datetime('now')))""",
+    ]
+    for s in be_stmts:
+        db_exec(s, fetch=False)
+    _ensure_column("projects", "backend_enabled", "INTEGER DEFAULT 0")
+
+def _backend_globally_enabled():
+    return RESTRICTED_OK and get_setting("backend_enabled", "0") == "1"
+
+def _backend_project_or_403(puuid, need_write=False):
+    proj = q1("SELECT * FROM projects WHERE uuid=?", (puuid,))
+    if not proj:
+        abort(404)
+    is_owner = proj["owner_id"] == session.get("user_id")
+    if not is_owner and not session.get("admin"):
+        abort(403)
+    if need_write and role_rank(session.get("role")) < ROLE_RANK["user"]:
+        abort(403)
+    return proj
+
+def _register_backend_routes():
+    """Backend marshrutlarini Flask app ga ro'yxatdan o'tkazadi."""
+
+    @app.route("/admin/backend/toggle", methods=["POST"])
+    @admin_req
+    def backend_admin_toggle():
+        if not RESTRICTED_OK:
+            return redirect(request.referrer or "/admin/settings")
+        cur = get_setting("backend_enabled", "0")
+        set_setting("backend_enabled", "0" if cur == "1" else "1")
+        return redirect(request.referrer or "/admin/settings")
+
+    @app.route("/admin/backend/logs")
+    @admin_req
+    def backend_admin_logs():
+        rows = db_exec("""SELECT l.*, p.name as pname, u.username FROM backend_exec_logs l
+                           LEFT JOIN projects p ON l.project_id=p.id
+                           LEFT JOIN users u ON l.user_id=u.id
+                           ORDER BY l.id DESC LIMIT 200""") or []
+        tr = "".join(f"""<tr>
+          <td>{r.get('pname') or '—'}</td><td>{r.get('username') or '—'}</td>
+          <td><code style="font-size:.72rem">{r['path']}</code></td>
+          <td>{r['duration_ms']} ms</td>
+          <td><span class="bx {'xg' if r['ok'] else 'xr'}">{'OK' if r['ok'] else 'Xato'}</span></td>
+          <td class="tm" style="font-size:.72rem">{(r.get('error') or '')[:80]}</td>
+          <td class="tm" style="font-size:.72rem">{str(r['created_at'])[:19]}</td>
+        </tr>""" for r in rows)
+        status = ("✅ RestrictedPython o'rnatilgan" if RESTRICTED_OK
+                  else "⚠️ RestrictedPython O'RNATILMAGAN — pip install RestrictedPython")
+        on = get_setting("backend_enabled", "0") == "1"
+        body = f"""
+        <div class="fl mb"><h2 style="color:#fff">🐍 Backend — ijro loglari</h2>
+          <span class="bx {'xg' if RESTRICTED_OK else 'xr'} mla">{status}</span></div>
+        <form method="POST" action="/admin/backend/toggle" class="mb">{csrf_field()}
+          <button class="btn {'br' if on else 'bg'} bsm" {'' if RESTRICTED_OK else 'disabled'}>
+            {"🔴 Global backendni o'chirish" if on else "🟢 Global backendni yoqish"}</button>
+        </form>
+        <div class="card" style="padding:0"><div class="tw">
+          <table><thead><tr><th>Loyiha</th><th>Foydalanuvchi</th><th>Yo'l</th><th>Vaqt</th>
+          <th>Holat</th><th>Xato</th><th>Vaqt belgisi</th></tr></thead>
+          <tbody>{tr or "<tr><td colspan=7 style='text-align:center;color:var(--mt);padding:16px'>Hali chaqiruv yo'q</td></tr>"}</tbody></table>
+        </div></div>"""
+        return _pg("Backend loglari", body, "backend")
+
+    @app.route("/projects/<puuid>/backend/toggle", methods=["POST"])
+    @user_req
+    @write_req
+    def backend_project_toggle(puuid):
+        proj = _backend_project_or_403(puuid, need_write=True)
+        if not _backend_globally_enabled():
+            abort(403)
+        new_val = 0 if proj.get("backend_enabled") else 1
+        db_exec("UPDATE projects SET backend_enabled=? WHERE id=?", (new_val, proj["id"]), fetch=False)
+        if new_val:
+            ensure_project_db(puuid)
+        return redirect(request.referrer or "/projects")
+
+    @app.route("/editor/backend/routes/<puuid>", methods=["GET", "POST"])
+    @user_req
+    def backend_routes_list(puuid):
+        proj = _backend_project_or_403(puuid)
+        if request.method == "GET":
+            rows = db_exec("SELECT id,path,method,updated_at FROM project_backend_routes WHERE project_id=? ORDER BY path",
+                           (proj["id"],)) or []
+            return jsonify({"routes": rows, "backend_enabled": bool(proj.get("backend_enabled")),
+                             "global_enabled": _backend_globally_enabled()})
+        if role_rank(session.get("role")) < ROLE_RANK["user"]:
+            return jsonify({"ok": False, "error": "Ruxsat yo'q"}), 403
+        if not proj.get("backend_enabled"):
+            return jsonify({"ok": False, "error": "Bu loyihada backend yoqilmagan"}), 403
+        d = request.get_json() or {}
+        path = "/" + (d.get("path") or "").strip().lstrip("/")
+        method = (d.get("method") or "GET").upper()
+        code = d.get("code", "")
+        if method not in ("GET", "POST") or path == "/" or not code.strip():
+            return jsonify({"ok": False, "error": "Noto'g'ri ma'lumot"}), 400
+        db_exec("""INSERT INTO project_backend_routes (project_id,path,method,code) VALUES (?,?,?,?)
+                   ON CONFLICT(project_id,path,method) DO UPDATE SET code=excluded.code, updated_at=datetime('now')""",
+                (proj["id"], path, method, code), fetch=False)
+        return jsonify({"ok": True})
+
+    @app.route("/editor/backend/routes/<puuid>/<int:rid>", methods=["GET", "DELETE"])
+    @user_req
+    def backend_route_item(puuid, rid):
+        proj = _backend_project_or_403(puuid)
+        if request.method == "DELETE":
+            if role_rank(session.get("role")) < ROLE_RANK["user"]:
+                return jsonify({"ok": False}), 403
+            db_exec("DELETE FROM project_backend_routes WHERE id=? AND project_id=?", (rid, proj["id"]), fetch=False)
+            return jsonify({"ok": True})
+        row = q1("SELECT * FROM project_backend_routes WHERE id=? AND project_id=?", (rid, proj["id"]))
+        if not row:
+            abort(404)
+        return jsonify({"route": row})
+
+    @app.route("/editor/backend/test/<puuid>/<int:rid>", methods=["POST"])
+    @user_req
+    @write_req
+    def backend_route_test(puuid, rid):
+        proj = _backend_project_or_403(puuid, need_write=True)
+        row = q1("SELECT * FROM project_backend_routes WHERE id=? AND project_id=?", (rid, proj["id"]))
+        if not row:
+            abort(404)
+        if not _backend_globally_enabled():
+            return jsonify({"ok": False, "error": "Backend global o'chirilgan"}), 403
+        test_input = (request.get_json() or {}).get("input", {})
+        db_path = ensure_project_db(puuid)
+        ok, payload, dur = run_user_backend(row["code"], test_input, db_path)
+        _be_log_exec(proj["id"], session["user_id"], f"[TEST]{row['path']}", dur, ok, "" if ok else str(payload))
+        return jsonify({"ok": ok, "result": payload if ok else None, "error": None if ok else payload, "duration_ms": dur})
+
+    @app.route("/api/backend/<puuid>/<path:route_path>", methods=["GET", "POST"])
+    def backend_run(puuid, route_path):
+        if not _backend_globally_enabled():
+            abort(403)
+        if session.get("_guest"):
+            abort(403)
+        if mode_on("global"):
+            abort(403)
+        if "user_id" not in session:
+            abort(401)
+        proj = q1("SELECT * FROM projects WHERE uuid=?", (puuid,))
+        if not proj or not proj.get("backend_enabled"):
+            abort(404)
+        path = "/" + route_path.lstrip("/")
+        row = q1("SELECT * FROM project_backend_routes WHERE project_id=? AND path=? AND method=?",
+                 (proj["id"], path, request.method))
+        if not row:
+            abort(404)
+        if not _be_check_rate_limit(session["user_id"]):
+            return jsonify({"error": f"Juda ko'p so'rov. Daqiqasiga maksimal {RATE_LIMIT_PER_MIN} marta chaqiring."}), 429
+        payload_in = request.get_json(silent=True) or dict(request.args)
+        db_path = ensure_project_db(puuid)
+        ok, payload, dur = run_user_backend(row["code"], payload_in, db_path)
+        _be_log_exec(proj["id"], session["user_id"], path, dur, ok, "" if ok else str(payload))
+        if ok:
+            return jsonify(payload)
+        return jsonify({"error": payload}), 400
+
+# ╔══════════════════════════════════════════════════════════════════════════╗
 # ║                     TERMINAL + MAIN                                       ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
 def print_banner():
@@ -3809,14 +4156,6 @@ def main():
             print(_c("  Noto'g'ri tanlov!",R))
 
 
-backend_engine.register_backend(app, {
-    "db_exec": db_exec, "q1": q1,
-    "get_setting": get_setting, "set_setting": set_setting,
-    "session": session, "request": request, "jsonify": jsonify,
-    "abort": abort, "redirect": redirect,
-    "role_rank": role_rank, "ROLE_RANK": ROLE_RANK,
-    "user_req": user_req, "admin_req": admin_req, "write_req": write_req,
-    "csrf_field": csrf_field, "mode_on": mode_on, "pg": _pg,
-})
+_register_backend_routes()
 if __name__=="__main__":
     main()
