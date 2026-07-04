@@ -905,6 +905,7 @@ function copyText(t){{navigator.clipboard.writeText(t).then(()=>{{
     <button onclick="loadAIChatHistory()" style="background:transparent;border:1px solid #252d45;color:#5c6890;border-radius:4px;padding:2px 6px;font-size:.65rem;cursor:pointer">📜 Tarix</button>
     <button onclick="clearAIChat()" style="background:transparent;border:1px solid #252d45;color:#5c6890;border-radius:4px;padding:2px 6px;font-size:.65rem;cursor:pointer">🗑 Tozalash</button>
     <button onclick="sendAIImage()" style="background:transparent;border:1px solid #252d45;color:#5c6890;border-radius:4px;padding:2px 6px;font-size:.65rem;cursor:pointer">🖼 Rasm</button>
+    <button onclick="showAITutorial()" style="background:transparent;border:1px solid #252d45;color:#f5c518;border-radius:4px;padding:2px 6px;font-size:.65rem;cursor:pointer">📖 Qo'llanma</button>
   </div>
   <div id="aiMessages" style="flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px"></div>
   <div style="padding:8px 12px;border-top:1px solid #252d45;display:flex;gap:6px;flex-shrink:0">
@@ -1007,6 +1008,51 @@ function sendAIImage(){{
   // AI ga rasm haqida xabar
   addAIMsg('🖼 Rasm qabul qilindi! Chiroyli rasm.','ai');
 }}
+function showAITutorial(){{
+  var tutorial='📖 **AI YORDAMCHI QO\\'LLANMASI**\\n\\n'
+    +'---\\n'
+    +'==MATN FORMATLASH:==\\n'
+    +'• `**qalin matn**` → **qalin matn**\\n'
+    +'• `*kursiv matn*` → *kursiv matn*\\n'
+    +'• `__tagiga chiziq__` → __tagiga chiziq__\\n'
+    +'• `~~ustiga chiziq~~` → ~~ustiga chiziq~~\\n'
+    +'• `==sariq marker==` → ==sariq marker==\\n'
+    +'• `!!qizil muhim!!` → !!qizil muhim!!\\n'
+    +'• `@@yashil@@` → @@yashil@@\\n'
+    +'• `##ko\\'k rang##` → ##ko\\'k rang##\\n'
+    +'• ` \\`kod\\` ` → `inline kod`\\n'
+    +'• ` \\`\\`\\`kod blok\\`\\`\\` ` → kod bloki\\n'
+    +'• `[havola](url)` → havola\\n'
+    +'• `---` → ajratuvchi chiziq\\n'
+    +'• `> iqtibos` → iqtibos bloki\\n\\n'
+    +'---\\n'
+    +'==RASMLAR BILAN ISHLASH:==\\n'
+    +'• 🖼 Rasm tugmasi → URL kiritib rasm yuborish\\n'
+    +'• O\\'qitishda javobga: `<img src="url">` yozing\\n'
+    +'• AI javobida rasm avtomatik ko\\'rinadi\\n\\n'
+    +'---\\n'
+    +'==KALIT SO\\'ZLAR:==\\n'
+    +'• **Salomlashish:** salom, hi, hello, qalay\\n'
+    +'• **HTML:** "div nima", "img tegi", "table"\\n'
+    +'• **CSS:** "flexbox nima", "margin", "grid"\\n'
+    +'• **Emmet:** "div*10 nima", "ul>li*5", "emmet"\\n'
+    +'• **Matematik:** 2+2, 100/4, (5+3)*2\\n'
+    +'• **O\\'yin:** tosh, qaychi, qogoz, latifa, son ber\\n'
+    +'• **Xotira:** "oldin nima dedim", "esla", "tarix"\\n'
+    +'• **Haqida:** "sen kim", "isming nima", "nima qila olasan"\\n\\n'
+    +'---\\n'
+    +'==O\\'QITISH:==\\n'
+    +'• 📚 O\\'qitish tugmasini bosing\\n'
+    +'• Savol va javob kiriting\\n'
+    +'• Javobda formatlash ishlatish mumkin\\n'
+    +'• Javobda `<img src="url">` bilan rasm qo\\'shish mumkin\\n'
+    +'• 🚫 Filtr tabida haqoratli so\\'zlarni boshqaring\\n\\n'
+    +'---\\n'
+    +'@@Omadli foydalanish!@@ 🚀';
+  var msgs=document.getElementById('aiMessages');
+  msgs.innerHTML='';
+  addAIMsg(tutorial,'ai');
+}}
 function openAITrainPanel(){{document.getElementById('aiTrainBg').style.display='flex';loadAIKnowledge();}}
 function closeAITrain(){{document.getElementById('aiTrainBg').style.display='none';}}
 (function(){{
@@ -1052,16 +1098,40 @@ function addAIMsg(text,role){{
   msgs.scrollTop=msgs.scrollHeight;
 }}
 function formatAIMsg(t){{
-  // Rasmlarni saqlash
+  // Rasmlar
   t=t.replace(/<img\s+([^>]*)>/gi,'<img $1 style="max-width:100%;border-radius:6px;margin:4px 0">');
-  // **bold**
-  t=t.replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>');
-  // `code`
-  t=t.replace(/`([^`]+)`/g,'<code style="background:#252d45;padding:1px 4px;border-radius:3px">$1</code>');
+  // ```code block```
+  t=t.replace(/```([^`]+)```/g,'<pre style="background:#0d0f18;border:1px solid #252d45;border-radius:6px;padding:8px;margin:4px 0;overflow-x:auto;font-size:.78rem">$1</pre>');
+  // **bold** qalin
+  t=t.replace(/\*\*([^*]+)\*\*/g,'<b style="color:#fff">$1</b>');
+  // *italic* kursiv
+  t=t.replace(/\*([^*]+)\*/g,'<i>$1</i>');
+  // __tagiga chiziq__
+  t=t.replace(/__([^_]+)__/g,'<u style="text-decoration-color:#7c6fff">$1</u>');
+  // ~~ustiga chiziq~~
+  t=t.replace(/~~([^~]+)~~/g,'<s style="color:#5c6890">$1</s>');
+  // ==sariq marker==
+  t=t.replace(/==([^=]+)==/g,'<mark style="background:#f5c518;color:#000;padding:0 3px;border-radius:2px">$1</mark>');
+  // !!qizil muhim!!
+  t=t.replace(/!!([^!]+)!!/g,'<span style="color:#f05d5d;font-weight:700">$1</span>');
+  // @@yashil muvaffaqiyat@@
+  t=t.replace(/@@([^@]+)@@/g,'<span style="color:#22d3a0;font-weight:600">$1</span>');
+  // ##ko'k havola rangi##
+  t=t.replace(/##([^#]+)##/g,'<span style="color:#60a5fa">$1</span>');
+  // `code` inline kod
+  t=t.replace(/`([^`]+)`/g,'<code style="background:#252d45;padding:1px 5px;border-radius:3px;font-size:.8rem">$1</code>');
+  // [havola](url)
+  t=t.replace(/\[([^\]]+)\]\(([^)]+)\)/g,'<a href="$2" target="_blank" style="color:#7c6fff;text-decoration:underline">$1</a>');
   // yangi qator
   t=t.replace(/\\n/g,'<br>');
-  // bullet points
-  t=t.replace(/• /g,'<span style="color:var(--ac)">•</span> ');
+  // --- ajratuvchi chiziq
+  t=t.replace(/^---$/gm,'<hr style="border:none;border-top:1px solid #252d45;margin:6px 0">');
+  // > iqtibos
+  t=t.replace(/^&gt;\s?(.+)/gm,'<blockquote style="border-left:3px solid #7c6fff;padding-left:8px;color:#8890b0;margin:4px 0">$1</blockquote>');
+  // • bullet points
+  t=t.replace(/• /g,'<span style="color:#7c6fff">•</span> ');
+  // Raqamli ro'yxat: 1. 2. 3.
+  t=t.replace(/^(\d+)\.\s/gm,'<span style="color:#22d3a0;font-weight:700">$1.</span> ');
   return t;
 }}
 function trainAI(type){{
