@@ -2860,7 +2860,7 @@ function renderTabs(){
     el.appendChild(label); el.appendChild(xBtn);
     if (splitOn){
       var sp = document.createElement('span');
-      sp.textContent = '⊞'; sp.title = 'O\\'ng panelda ochish';
+      sp.textContent = '⊞'; sp.title = 'Ong panelda ochish';
       sp.style.marginLeft='4px'; sp.style.opacity='.6';
       sp.onclick = function(ev){ ev.stopPropagation(); openFile(p, 2); };
       el.appendChild(sp);
@@ -2994,7 +2994,7 @@ function moveFile(oldp, newp){
   if (oldp===newp) return;
   authFetch('/editor/fs/rename',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({uuid:'UUID',old_path:oldp,new_path:newp})
-  }).then(function(r){return r.json();}).then(function(d){ if(d.ok) loadAll(); else flash('✗ Ko\\'chirishda xato','rd'); });
+  }).then(function(r){return r.json();}).then(function(d){ if(d.ok) loadAll(); else flash('✗ Kochirishda xato','rd'); });
 }
 function renderTreeNode(node, host, depth){
   var keys = Object.keys(node.children).sort(function(a,b){
@@ -3248,7 +3248,7 @@ function runGlobalSearch(){
   var q = document.getElementById('gsQuery').value;
   var results = document.getElementById('gsResults');
   results.innerHTML = '';
-  if (!q){ results.innerHTML = '<div class="modalRow"><small>So\\'z kiriting</small></div>'; return; }
+  if (!q){ results.innerHTML = '<div class="modalRow"><small>Soz kiriting</small></div>'; return; }
   var contents = allFileContents();
   var totalHits = 0;
   Object.keys(contents).forEach(function(path){
@@ -3273,7 +3273,7 @@ function runGlobalSearch(){
 function runGlobalReplace(){
   var q = document.getElementById('gsQuery').value;
   var rep = document.getElementById('gsReplace').value;
-  if (!q) { flash('⚠ Qidiruv so\\'zi bosh','yl'); return; }
+  if (!q) { flash('⚠ Qidiruv sozi bosh','yl'); return; }
   if (!confirm("Barcha fayllarda \\""+q+"\\" ni \\""+rep+"\\" ga almashtirasizmi? Bekor qilib bo'lmaydi.")) return;
   var changed = 0;
   fileList.forEach(function(f){
@@ -3325,7 +3325,7 @@ function addSnippet(){
       if (!SNIPPETS[lang]) SNIPPETS[lang]={};
       SNIPPETS[lang][trig] = body;
       document.getElementById('snpTrigger').value=''; document.getElementById('snpBody').value='';
-      renderSnippetList(); flash('✓ Snippet qo\\'shildi','gr');
+      renderSnippetList(); flash('✓ Snippet qoshildi','gr');
     } else flash('✗ Xato: trigger allaqachon mavjud','rd');
   });
 }
@@ -3430,7 +3430,7 @@ function addTodo(){
   var inp=document.getElementById('todoInput');var title=inp.value.trim();
   var pri=document.getElementById('todoPriority').value;
   if(!title){flash('⚠ Vazifa kiriting','yl');return;}
-  authFetch('/api/todos/UUID',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:title,priority:pri})}).then(function(r){return r.json();}).then(function(d){if(d.ok){inp.value='';loadTodos();flash('✓ Qo\\'shildi','gr');}});
+  authFetch('/api/todos/UUID',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:title,priority:pri})}).then(function(r){return r.json();}).then(function(d){if(d.ok){inp.value='';loadTodos();flash('✓ Qoshildi','gr');}});
 }
 function toggleTodo(id,done){
   authFetch('/api/todos/UUID/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({is_done:done})}).then(function(){loadTodos();});
@@ -3471,17 +3471,21 @@ function openCDNPanel(){
   document.getElementById('cdnBg').style.display='flex';
   authFetch('/api/cdn/libraries').then(function(r){return r.json();}).then(function(d){
     var list=document.getElementById('cdnList');
-    list.innerHTML=(d.libraries||[]).map(function(lib){
-      return '<div class="modalRow" style="flex-direction:column;align-items:flex-start;gap:4px"><div class="fl" style="width:100%"><b style="color:#fff;font-size:.82rem">'+lib.name+'</b><span class="bx xp mla">'+lib.category+'</span><button class="btn bp bsm" onclick="addCDN(\''+encodeURIComponent(lib.css||'')+'\',\''+encodeURIComponent(lib.js||'')+'\')">+ Ulash</button></div></div>';
+    window._cdnData=d.libraries||[];
+    list.innerHTML=window._cdnData.map(function(lib,i){
+      return '<div class="modalRow" style="flex-direction:column;align-items:flex-start;gap:4px"><div class="fl" style="width:100%"><b style="color:#fff;font-size:.82rem">'+lib.name+'</b><span class="bx xp mla">'+lib.category+'</span><button class="btn bp bsm" onclick="addCDNByIdx('+i+')">+ Ulash</button></div></div>';
     }).join('');
   });
 }
-function addCDN(cssEnc,jsEnc){
-  var css=decodeURIComponent(cssEnc),js=decodeURIComponent(jsEnc);
+function addCDNByIdx(idx){
+  var lib=window._cdnData[idx];if(!lib) return;
+  addCDN(lib.css||'',lib.js||'');
+}
+function addCDN(css,js){
   authFetch('/api/cdn/add/UUID',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({css:css,js:js})}).then(function(r){return r.json();}).then(function(d){
     if(d.ok){flash('✓ Kutubxona ulandi','gr');loadAll();closeModal('cdnBg');}
-    else flash('✗ '+(d.error||'Xato'),'rd');
+    else flash('Xato: '+(d.error||''),'rd');
   });
 }
 document.addEventListener('DOMContentLoaded',function(){var el=document.getElementById('cdnBg');if(el)el.addEventListener('click',function(e){if(e.target.id==='cdnBg')closeModal('cdnBg');});});
@@ -3501,7 +3505,7 @@ function loadPalettes(){
     Object.keys(d.palettes||{}).forEach(function(name){
       html+='<p style="color:var(--mt);font-size:.72rem;margin:8px 0 4px">'+name+'</p><div style="display:flex;flex-wrap:wrap;gap:4px">';
       d.palettes[name].forEach(function(c){
-        html+='<div onclick="pickColor(\\''+c+'\\')" style="width:24px;height:24px;border-radius:4px;cursor:pointer;background:'+c+';border:1px solid var(--brd)" title="'+c+'"></div>';
+        html+='<div onclick="pickColor(''+c+'') style="width:24px;height:24px;border-radius:4px;cursor:pointer;background:'+c+';border:1px solid var(--brd)" title="'+c+'"></div>';
       });
       html+='</div>';
     });
@@ -3515,7 +3519,7 @@ function insertColor(){
   var cur=cm.getCursor();
   cm.replaceRange(c,cur);
   closeModal('colorBg');
-  flash('✓ Rang qo\\'shildi: '+c,'gr');
+  flash('✓ Rang qoshildi: '+c,'gr');
 }
 document.addEventListener('DOMContentLoaded',function(){document.getElementById('colorBg').addEventListener('click',function(e){if(e.target.id==='colorBg')closeModal('colorBg');});});
 
@@ -3541,7 +3545,7 @@ document.addEventListener('DOMContentLoaded',function(){document.getElementById(
    PWA GENERATOR
    ══════════════════════════════════════════════════════════════════════ */
 function generatePWA(){
-  if(!confirm('Loyihaga PWA fayllarni (manifest.json, sw.js) qo\\'shish va index.html ni yangilashni xohlaysizmi?')) return;
+  if(!confirm('Loyihaga PWA fayllarni (manifest.json, sw.js) qoshish va index.html ni yangilashni xohlaysizmi?')) return;
   authFetch('/api/pwa/generate/UUID',{method:'POST'}).then(function(r){return r.json();}).then(function(d){
     if(d.ok){flash('✓ PWA yaratildi: '+d.files.join(', '),'gr');loadAll();}
     else flash('✗ Xato','rd');
@@ -3578,7 +3582,7 @@ document.addEventListener('DOMContentLoaded',function(){
       if(d.ok){
         var tag='<img src="'+d.url+'" alt="'+d.filename+'">';
         if(cm&&activePath) cm.replaceRange(tag+'\\n',cm.getCursor());
-        flash('✓ Rasm yuklandi va qo\\'shildi','gr');
+        flash('✓ Rasm yuklandi va qoshildi','gr');
         scheduleRun();
       } else flash('✗ '+(d.error||'Xato'),'rd');
     });
@@ -3600,7 +3604,7 @@ document.addEventListener('DOMContentLoaded',function(){
         authFetch('/editor/paste-image/UUID',{method:'POST',body:fd}).then(function(r){return r.json();}).then(function(d){
           if(d.ok&&cm&&activePath){
             cm.replaceRange('<img src="'+d.url+'" alt="paste">\\n',cm.getCursor());
-            flash('✓ Rasm clipboard dan qo\\'shildi','gr');
+            flash('✓ Rasm clipboard dan qoshildi','gr');
             scheduleRun();
           }
         });
@@ -3656,7 +3660,7 @@ function renderBackendList(){
   beRoutes.forEach(function(r){
     var row = document.createElement('div');
     row.className = 'modalRow';
-    row.innerHTML = '<span>['+r.method+'] /'+r.path+' '+(r.is_enabled?'':'<small>(o\\'chirilgan)</small>')+'</span>'+
+    row.innerHTML = '<span>['+r.method+'] /'+r.path+' '+(r.is_enabled?'':'<small>(ochirilgan)</small>')+'</span>'+
       '<span class="fl"><button class="btn bgh bsm" data-t="tog">'+(r.is_enabled?'⏸':'▶️')+'</button>'+
       '<button class="btn br bsm" data-t="del">🗑</button></span>';
     row.querySelectorAll('button')[0].onclick = function(){ toggleBackendRoute(r.id, !r.is_enabled); };
@@ -3669,13 +3673,13 @@ function addBackendRoute(){
   var method = document.getElementById('beMethod').value;
   var path = document.getElementById('bePath').value.trim();
   var code = document.getElementById('beCode').value;
-  if (!path){ flash('⚠ Yo\\'l kiriting','yl'); return; }
+  if (!path){ flash('⚠ Yol kiriting','yl'); return; }
   authFetch('/editor/backend/UUID',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({path:path,method:method,code:code})
   }).then(function(r){return r.json();}).then(function(d){
     if (d.ok){
       document.getElementById('bePath').value=''; document.getElementById('beCode').value='';
-      beRefresh(); flash('✓ Route qo\\'shildi','gr');
+      beRefresh(); flash('✓ Route qoshildi','gr');
     } else flash('✗ '+(d.error||'Xato'),'rd');
   });
 }
@@ -3685,7 +3689,7 @@ function toggleBackendRoute(id, enabled){
   }).then(function(r){return r.json();}).then(function(){ beRefresh(); });
 }
 function deleteBackendRoute(id){
-  if (!confirm('Route o\\'chirilsinmi?')) return;
+  if (!confirm('Route ochirilsinmi?')) return;
   authFetch('/editor/backend/UUID/'+id,{method:'DELETE'}).then(function(r){return r.json();}).then(function(){ beRefresh(); });
 }
 document.addEventListener('DOMContentLoaded', function(){
