@@ -3505,11 +3505,14 @@ function loadPalettes(){
     Object.keys(d.palettes||{}).forEach(function(name){
       html+='<p style="color:var(--mt);font-size:.72rem;margin:8px 0 4px">'+name+'</p><div style="display:flex;flex-wrap:wrap;gap:4px">';
       d.palettes[name].forEach(function(c){
-        html+='<div onclick="pickColor(''+c+'') style="width:24px;height:24px;border-radius:4px;cursor:pointer;background:'+c+';border:1px solid var(--brd)" title="'+c+'"></div>';
+        html+='<div data-color="'+c+'" style="width:24px;height:24px;border-radius:4px;cursor:pointer;background:'+c+';border:1px solid var(--brd)" title="'+c+'"></div>';
       });
       html+='</div>';
     });
     box.innerHTML=html;
+    box.querySelectorAll('[data-color]').forEach(function(el){
+      el.onclick=function(){pickColor(el.getAttribute('data-color'));};
+    });
   });
 }
 function pickColor(c){document.getElementById('colorHexVal').value=c;document.getElementById('colorPickerInput').value=c;}
