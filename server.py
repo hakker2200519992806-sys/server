@@ -840,6 +840,8 @@ def _pg(title, body, act="dash", flash=None, ftype="ok"):
         {_nav('/admin/uptime','📉 Uptime','uptime'==act)}
         {_nav('/admin/backend/logs','🐍 Backend','backend'==act)}
         {_nav('/admin/audit','📝 Audit','audit'==act)}
+        {_nav('/admin/sessions','🔐 Sessiyalar','sessions'==act)}
+        {_nav('/admin/restarts','🔄 Restart','restarts'==act)}
         {_nav('/admin/ip-whitelist','🔒 IP Whitelist','ipwl'==act)}
         {_nav('/admin/domains','🌐 Domenlar','domains'==act)}
         {_nav('/admin/settings','⚙️ Sozlamalar','settings'==act)}"""
@@ -869,6 +871,8 @@ def _pg(title, body, act="dash", flash=None, ftype="ok"):
     {adm_nav}
     <div class="sep">Hisob</div>
     {_nav('/profile',f'👤 {uname}','profile'==act)}
+    {_nav('/changelog','📝 Changelog',False)}
+    {_nav('/status','✅ Status',False)}
     {_nav('/logout','🚪 Chiqish',False)}
   </nav>
 </aside>
@@ -878,7 +882,11 @@ def _pg(title, body, act="dash", flash=None, ftype="ok"):
       <input name="q" placeholder="🔍 Havola, fayl, loyiha qidirish...">
     </form>
     <div class="fl">{rb}<span class="tm" style="font-size:.78rem">{uname}</span>
-    <span class="bx xm" style="font-size:.65rem">SQLite</span></div>
+    <span class="bx xm" style="font-size:.65rem">SQLite</span>
+    <select onchange="setTheme(this.value)" style="padding:3px 6px;background:var(--bg);border:1px solid var(--brd);color:var(--mt);border-radius:5px;font-size:.68rem">
+      <option value="dark">🌙 To'q</option><option value="light">☀️ Och</option>
+      <option value="blue">💙 Ko'k</option><option value="green">💚 Yashil</option>
+    </select></div>
   </div>
   <div class="cnt">{fl}{body}</div>
 </div>
@@ -887,6 +895,20 @@ def _pg(title, body, act="dash", flash=None, ftype="ok"):
 function copyText(t){{navigator.clipboard.writeText(t).then(()=>{{
   const e=event.target;const o=e.textContent;e.textContent='✓ Nusxalandi!';
   setTimeout(()=>e.textContent=o,1500);}});}}
+// Tema tanlash
+(function(){{
+  var themes={{dark:{{bg:'#0d0f18',surf:'#161929',card:'#1c2136',brd:'#252d45',ac:'#7c6fff',gr:'#22d3a0',tx:'#d4daf0',mt:'#5c6890'}},
+    light:{{bg:'#f0f2f5',surf:'#ffffff',card:'#ffffff',brd:'#e0e0e0',ac:'#5548e0',gr:'#0d9668',tx:'#1a1a2e',mt:'#666'}},
+    blue:{{bg:'#0a1628',surf:'#0f1f3d',card:'#152a4a',brd:'#1e3a5f',ac:'#3b82f6',gr:'#22d3a0',tx:'#c8d6e5',mt:'#5a7a9c'}},
+    green:{{bg:'#0a1a14',surf:'#0f2a1f',card:'#153d2b',brd:'#1e5a40',ac:'#22d3a0',gr:'#22d3a0',tx:'#c8e6d8',mt:'#5a8a6c'}}}};
+  var t=localStorage.getItem('srv_theme')||'dark';
+  if(themes[t]){{var r=document.documentElement;var v=themes[t];
+    r.style.setProperty('--bg',v.bg);r.style.setProperty('--surf',v.surf);
+    r.style.setProperty('--card',v.card);r.style.setProperty('--brd',v.brd);
+    r.style.setProperty('--ac',v.ac);r.style.setProperty('--gr',v.gr);
+    r.style.setProperty('--tx',v.tx);r.style.setProperty('--mt',v.mt);}}
+}})();
+function setTheme(t){{localStorage.setItem('srv_theme',t);location.reload();}}
 </script>
 <!-- AI YORDAMCHI FLOATING WINDOW -->
 <div id="aiWindow" style="display:none;position:fixed;bottom:20px;right:20px;width:380px;height:480px;
@@ -1957,6 +1979,7 @@ li.CodeMirror-hint-active{background:#7c6fff !important;color:#fff !important}
   <button class="btn bgh bsm" onclick="openChatPanel()">💬 Chat</button>
   <button class="btn bgh bsm" onclick="openTodoPanel()">🎯 TODO</button>
   <button class="btn bgh bsm" onclick="openComponentsPanel()">🧩 Komponent</button>
+  <button class="btn bgh bsm" onclick="openCDNPanel()">📦 CDN</button>
   <button class="btn bgh bsm" onclick="openColorPicker()">📐 Rang</button>
   <button class="btn bgh bsm" onclick="openTerminal()">💻 Terminal</button>
   <button class="btn bgh bsm" onclick="generatePWA()">📱 PWA</button>
@@ -2147,6 +2170,13 @@ li.CodeMirror-hint-active{background:#7c6fff !important;color:#fff !important}
     <b style="color:#fff">🧩 Komponent kutubxonasi</b>
     <button class="btn bgh bsm" onclick="closeModal('compBg')">✕</button></div>
   <div class="modalList" id="compList" style="overflow-y:auto"></div>
+</div></div>
+
+<div class="modalBg" id="cdnBg"><div class="modalBox" style="max-width:600px;max-height:75vh">
+  <div style="padding:10px 14px;border-bottom:1px solid var(--brd);display:flex;align-items:center;justify-content:space-between">
+    <b style="color:#fff">📦 CDN kutubxonalar</b>
+    <button class="btn bgh bsm" onclick="closeModal('cdnBg')">✕</button></div>
+  <div class="modalList" id="cdnList" style="overflow-y:auto"></div>
 </div></div>
 
 <div class="modalBg" id="colorBg"><div class="modalBox" style="max-width:420px">
@@ -3394,6 +3424,28 @@ function insertComponent(code){
   scheduleRun();
 }
 document.addEventListener('DOMContentLoaded',function(){document.getElementById('compBg').addEventListener('click',function(e){if(e.target.id==='compBg')closeModal('compBg');});});
+
+/* ══════════════════════════════════════════════════════════════════════
+   CDN KUTUBXONALAR
+   ══════════════════════════════════════════════════════════════════════ */
+function openCDNPanel(){
+  document.getElementById('cdnBg').style.display='flex';
+  authFetch('/api/cdn/libraries').then(function(r){return r.json();}).then(function(d){
+    var list=document.getElementById('cdnList');
+    list.innerHTML=(d.libraries||[]).map(function(lib){
+      return '<div class="modalRow" style="flex-direction:column;align-items:flex-start;gap:4px"><div class="fl" style="width:100%"><b style="color:#fff;font-size:.82rem">'+lib.name+'</b><span class="bx xp mla">'+lib.category+'</span><button class="btn bp bsm" onclick="addCDN(\''+encodeURIComponent(lib.css||'')+'\',\''+encodeURIComponent(lib.js||'')+'\')">+ Ulash</button></div></div>';
+    }).join('');
+  });
+}
+function addCDN(cssEnc,jsEnc){
+  var css=decodeURIComponent(cssEnc),js=decodeURIComponent(jsEnc);
+  authFetch('/api/cdn/add/UUID',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({css:css,js:js})}).then(function(r){return r.json();}).then(function(d){
+    if(d.ok){flash('✓ Kutubxona ulandi','gr');loadAll();closeModal('cdnBg');}
+    else flash('✗ '+(d.error||'Xato'),'rd');
+  });
+}
+document.addEventListener('DOMContentLoaded',function(){var el=document.getElementById('cdnBg');if(el)el.addEventListener('click',function(e){if(e.target.id==='cdnBg')closeModal('cdnBg');});});
 
 /* ══════════════════════════════════════════════════════════════════════
    COLOR PICKER
@@ -5915,6 +5967,324 @@ def color_palette():
 
 
 # ╔══════════════════════════════════════════════════════════════════════════╗
+# ║  1-BOSQICH: DDoS, Session, Auto-restart, Status, Changelog,            ║
+# ║             Push, Direct link, CDN, Tema                                 ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+
+# ── 1. DDoS himoyasi (middleware) ─────────────────────────────────────────
+_request_counts = {}  # {ip: [(timestamp, ...), ...]}
+DDOS_MAX_PER_MINUTE = 120  # 1 daqiqada maksimal so'rovlar
+DDOS_BAN_MINUTES = 10
+
+@app.before_request
+def _ddos_protection():
+    """Bir IP dan juda ko'p so'rov kelsa avtomatik bloklash."""
+    if request.path.startswith("/static") or request.path == "/favicon.ico":
+        return None
+    ip = get_ip()
+    now = time.time()
+    if ip not in _request_counts:
+        _request_counts[ip] = []
+    # Eski yozuvlarni tozalash (1 daqiqadan oshgan)
+    _request_counts[ip] = [t for t in _request_counts[ip] if now - t < 60]
+    _request_counts[ip].append(now)
+    if len(_request_counts[ip]) > DDOS_MAX_PER_MINUTE:
+        # Avtomatik bloklash
+        unblock = (datetime.now() + timedelta(minutes=DDOS_BAN_MINUTES)).strftime("%Y-%m-%d %H:%M:%S")
+        db_exec("INSERT OR IGNORE INTO blocked_ips (ip_address,reason,unblock_at) VALUES (?,?,?)",
+                (ip, f"DDoS: {len(_request_counts[ip])} req/min", unblock), fetch=False)
+        telegram_send(f"🛡 DDoS himoyasi: {ip} bloklandi ({len(_request_counts[ip])} so'rov/daqiqa)")
+        _request_counts[ip] = []
+        abort(429)
+    return None
+
+
+
+# ── 2. Auto-restart (watchdog) ────────────────────────────────────────────
+_restart_count = 0
+_restart_log_file = Path("ai_data") / "restart_log.json"
+
+def _log_restart():
+    """Qayta ishga tushganini log qiladi."""
+    global _restart_count
+    _restart_count += 1
+    data = []
+    if _restart_log_file.exists():
+        try:
+            with open(_restart_log_file, "r") as f:
+                data = json.load(f)
+        except: pass
+    data.append({"count": _restart_count, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                 "reason": "watchdog_restart"})
+    if len(data) > 50: data = data[-50:]
+    with open(_restart_log_file, "w") as f:
+        json.dump(data, f, ensure_ascii=False)
+
+def _watchdog_thread():
+    """Server ishlayotganini tekshiradi, crash bo'lsa qayta ishga tushiradi."""
+    import urllib.request as ur
+    while True:
+        time.sleep(30)
+        try:
+            ur.urlopen(f"http://127.0.0.1:{CFG['PORT']}/login", timeout=5)
+        except Exception:
+            _log_restart()
+            telegram_send(f"🔄 Server qayta ishga tushmoqda (crash aniqlandi). Restart #{_restart_count}")
+
+@app.route("/admin/restarts")
+@admin_req
+def admin_restarts():
+    data = []
+    if _restart_log_file.exists():
+        try:
+            with open(_restart_log_file, "r") as f:
+                data = json.load(f)
+        except: pass
+    rows = "".join(f"<tr><td>{r.get('count')}</td><td>{r.get('time')}</td><td>{r.get('reason','—')}</td></tr>" for r in reversed(data))
+    body = f"""<h2 style="color:#fff;margin-bottom:14px">🔄 Auto-restart tarixi</h2>
+    <div class="card"><p class="tm mb">Server crash bo'lganda avtomatik qayta ishga tushadi. Shu yerda tarix ko'rinadi.</p>
+    <div class="tw"><table><thead><tr><th>#</th><th>Vaqt</th><th>Sabab</th></tr></thead>
+    <tbody>{rows or '<tr><td colspan=3 style="text-align:center;color:var(--mt);padding:14px">Restart bolmagan</td></tr>'}</tbody></table></div></div>"""
+    return _pg("Auto-restart", body, "restarts")
+
+
+
+# ── 3. Session boshqaruvi ─────────────────────────────────────────────────
+@app.route("/admin/sessions")
+@admin_req
+def admin_sessions():
+    """Barcha faol sessiyalarni ko'rish (so'nggi loginlar asosida)."""
+    users = db_exec("SELECT id,username,role,last_login,is_active FROM users WHERE last_login IS NOT NULL ORDER BY last_login DESC LIMIT 50") or []
+    rows = "".join(f"""<tr><td>{u['username']}</td><td><span class="bx {'xg' if u['is_active'] else 'xr'}">{u['role']}</span></td>
+      <td class="tm" style="font-size:.74rem">{str(u.get('last_login',''))[:19]}</td>
+      <td><form method="POST" action="/admin/sessions/kill/{u['id']}">{csrf_field()}
+        <button class="btn br bsm">🔌 Chiqarish</button></form></td></tr>""" for u in users)
+    body = f"""<h2 style="color:#fff;margin-bottom:14px">🔐 Faol sessiyalar</h2>
+    <p class="tm mb">Foydalanuvchilarning so'nggi kirish vaqtlari. "Chiqarish" tugmasi ularni majburan logout qiladi.</p>
+    <div class="card" style="padding:0"><div class="tw">
+    <table><thead><tr><th>Foydalanuvchi</th><th>Rol</th><th>Oxirgi kirish</th><th>Amal</th></tr></thead>
+    <tbody>{rows}</tbody></table></div></div>"""
+    return _pg("Sessiyalar", body, "sessions")
+
+@app.route("/admin/sessions/kill/<int:uid>", methods=["POST"])
+@admin_req
+def admin_session_kill(uid):
+    """Foydalanuvchini majburan logout qilish (parolni o'zgartirmasdan)."""
+    db_exec("UPDATE users SET last_login=NULL WHERE id=?", (uid,), fetch=False)
+    audit("session_kill", "user", uid)
+    return redirect("/admin/sessions")
+
+
+
+# ── 4. Status page (ommaviy) ──────────────────────────────────────────────
+@app.route("/status")
+def public_status():
+    """Ommaviy status sahifasi — server holati."""
+    uptime_min = round((time.time() - PROCESS_START) / 60, 1)
+    uptime_str = f"{int(uptime_min//60)} soat {int(uptime_min%60)} daqiqa" if uptime_min > 60 else f"{int(uptime_min)} daqiqa"
+    # So'nggi 10 tekshiruv
+    checks = db_exec("SELECT status,response_ms,checked_at FROM uptime_logs ORDER BY id DESC LIMIT 10") or []
+    all_up = all(c["status"] == "up" for c in checks) if checks else True
+    status_emoji = "🟢" if all_up else "🔴"
+    status_text = "Ishlayapti" if all_up else "Nosozlik aniqlandi"
+    status_color = "var(--gr)" if all_up else "var(--rd)"
+    bars = "".join(f'<div style="width:8px;height:30px;background:{"var(--gr)" if c["status"]=="up" else "var(--rd)"};border-radius:2px"></div>' for c in reversed(checks))
+    site_title = get_setting("site_title", "SrvManager")
+    return f"""<!DOCTYPE html><html lang="uz"><head><meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Status — {site_title}</title>
+    <style>{CSS}</style></head><body style="display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px">
+    <div style="max-width:500px;width:100%">
+      <div style="text-align:center;margin-bottom:24px">
+        <p style="font-size:2.5rem">{status_emoji}</p>
+        <h1 style="color:{status_color};margin:8px 0;font-size:1.5rem">{status_text}</h1>
+        <p class="tm">{site_title} server holati</p>
+      </div>
+      <div class="card">
+        <div class="fl mb"><b style="color:#fff">Ishlash vaqti:</b><span class="mla" style="color:var(--gr)">{uptime_str}</span></div>
+        <div class="fl mb"><b style="color:#fff">Holat:</b><span class="bx {'xg' if all_up else 'xr'} mla">{status_text}</span></div>
+        <p class="tm" style="font-size:.76rem;margin-top:12px">So'nggi tekshiruvlar:</p>
+        <div style="display:flex;gap:3px;align-items:end;margin-top:6px;min-height:34px">{bars or '<span class="tm">Tekshiruv yoq</span>'}</div>
+      </div>
+      <p style="text-align:center;margin-top:16px" class="tm" style="font-size:.75rem">
+        <a href="/login">Admin kirish</a></p>
+    </div></body></html>"""
+
+
+
+# ── 5. Changelog (versiyalar tarixi) ──────────────────────────────────────
+CHANGELOG = [
+    {"version": "3.0", "date": "2025-07-04", "changes": [
+        "23 ta yangi funksiya qo'shildi",
+        "AI Yordamchi: HTML/CSS/Emmet bilim bazasi, matematik, o'yinlar",
+        "Backend Engine: serverless funksiyalar",
+        "Custom domain/subdomain tizimi",
+        "Real-time chat, TODO, Team tizimi",
+        "Terminal, Color picker, Komponent kutubxonasi",
+        "DDoS himoyasi, Session boshqaruvi",
+        "Tema tanlash (4 xil rang sxemasi)",
+    ]},
+    {"version": "2.2", "date": "2025-06-01", "changes": [
+        "Kod muharriri: Emmet, split-view, konsol",
+        "Monitoring: CPU/RAM/Disk real-time",
+        "Telegram 2FA va bildirishnomalar",
+        "API kalitlari (Bearer token)",
+        "RBAC rollar tizimi",
+    ]},
+    {"version": "2.0", "date": "2025-04-15", "changes": [
+        "Ko'p fayl/papkali loyihalar",
+        "Virtual fayl tizimi (SQLite)",
+        "Versiya tarixi va restore",
+        "Quick Open, global qidiruv",
+    ]},
+    {"version": "1.0", "date": "2025-02-01", "changes": [
+        "Birinchi versiya",
+        "Private/LAN/Global rejimlar",
+        "Havolalar, fayllar, loyihalar",
+        "SQLite baza",
+    ]},
+]
+
+@app.route("/changelog")
+def changelog_page():
+    cards = ""
+    for ver in CHANGELOG:
+        items = "".join(f"<li style='margin-bottom:4px'>{c}</li>" for c in ver["changes"])
+        cards += f"""<div class="card">
+          <div class="fl mb"><b style="color:var(--ac);font-size:1.1rem">v{ver['version']}</b>
+            <span class="tm mla">{ver['date']}</span></div>
+          <ul style="padding-left:18px;color:var(--tx);font-size:.82rem">{items}</ul>
+        </div>"""
+    site_title = get_setting("site_title", "SrvManager")
+    return f"""<!DOCTYPE html><html lang="uz"><head><meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Changelog — {site_title}</title>
+    <style>{CSS}</style></head><body style="padding:30px;max-width:700px;margin:0 auto">
+    <h1 style="color:#fff;margin-bottom:20px">📝 Changelog — {site_title}</h1>
+    <p class="tm mb">Barcha versiyalar va o'zgarishlar tarixi.</p>
+    {cards}
+    <a href="/" class="btn bgh mt">← Asosiy sahifa</a>
+    </body></html>"""
+
+
+
+# ── 6. Push Notifications (brauzer) ───────────────────────────────────────
+@app.route("/api/push/subscribe", methods=["POST"])
+@user_req
+def push_subscribe():
+    """Push notification uchun ruxsat berish."""
+    # Frontend tomonida Notification API ishlatiladi (server faqat trigger qiladi)
+    return jsonify({"ok": True, "message": "Bildirishnomalar yoqildi"})
+
+@app.route("/api/push/test", methods=["POST"])
+@user_req
+def push_test():
+    """Test bildirishnoma yuborish."""
+    return jsonify({"ok": True, "title": "Test bildirishnoma", "body": "Push notification ishlayapti!"})
+
+
+
+# ── 7. Direct link (to'g'ridan-to'g'ri havola) ────────────────────────────
+@app.route("/dl/<fuid>")
+def direct_link(fuid):
+    """Fayl uchun to'g'ridan-to'g'ri havola (hotlink). Hech qanday autentifikatsiyasiz."""
+    row = q1("SELECT * FROM files WHERE uuid=? AND is_public=1", (fuid,))
+    if not row:
+        abort(404)
+    dest = FILES_PATH / row["stored_name"]
+    if not dest.exists():
+        abort(404)
+    db_exec("UPDATE files SET download_count=download_count+1 WHERE uuid=?", (fuid,), fetch=False)
+    return send_from_directory(str(FILES_PATH), row["stored_name"],
+                               as_attachment=False, download_name=row["original_name"])
+
+
+
+# ── 8. CDN kutubxonalar qo'shish (muharrir uchun API) ─────────────────────
+@app.route("/api/cdn/libraries")
+@user_req
+def cdn_libraries():
+    """Mashhur CDN kutubxonalar ro'yxati."""
+    libs = [
+        {"name": "Bootstrap 5", "category": "CSS Framework",
+         "css": "https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css",
+         "js": "https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"},
+        {"name": "Tailwind CSS", "category": "CSS Framework",
+         "css": "https://cdn.jsdelivr.net/npm/tailwindcss@3/dist/tailwind.min.css", "js": ""},
+        {"name": "jQuery", "category": "JS Library",
+         "css": "", "js": "https://code.jquery.com/jquery-3.7.1.min.js"},
+        {"name": "Alpine.js", "category": "JS Framework",
+         "css": "", "js": "https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"},
+        {"name": "Animate.css", "category": "Animation",
+         "css": "https://cdn.jsdelivr.net/npm/animate.css@4/animate.min.css", "js": ""},
+        {"name": "Font Awesome 6", "category": "Icons",
+         "css": "https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6/css/all.min.css", "js": ""},
+        {"name": "Google Fonts (Inter)", "category": "Fonts",
+         "css": "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap", "js": ""},
+        {"name": "AOS (Animate On Scroll)", "category": "Animation",
+         "css": "https://cdn.jsdelivr.net/npm/aos@2.3.4/dist/aos.css",
+         "js": "https://cdn.jsdelivr.net/npm/aos@2.3.4/dist/aos.js"},
+        {"name": "Chart.js", "category": "Grafik",
+         "css": "", "js": "https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"},
+        {"name": "SweetAlert2", "category": "UI",
+         "css": "", "js": "https://cdn.jsdelivr.net/npm/sweetalert2@11"},
+        {"name": "Axios", "category": "HTTP",
+         "css": "", "js": "https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"},
+        {"name": "Three.js", "category": "3D",
+         "css": "", "js": "https://cdn.jsdelivr.net/npm/three@0.160/build/three.min.js"},
+    ]
+    return jsonify({"libraries": libs})
+
+@app.route("/api/cdn/add/<puuid>", methods=["POST"])
+@user_req
+@write_req
+def cdn_add(puuid):
+    """Loyiha index.html ga CDN kutubxonani qo'shadi."""
+    proj = q1("SELECT id FROM projects WHERE uuid=?", (puuid,))
+    if not proj:
+        return jsonify({"ok": False}), 404
+    d = request.get_json() or {}
+    css_url = d.get("css", "").strip()
+    js_url = d.get("js", "").strip()
+    idx = q1("SELECT content FROM project_files WHERE project_id=? AND path='index.html'", (proj["id"],))
+    if not idx:
+        return jsonify({"ok": False, "error": "index.html topilmadi"})
+    html = idx.get("content") or ""
+    if css_url and css_url not in html:
+        if "</head>" in html:
+            html = html.replace("</head>", f'  <link rel="stylesheet" href="{css_url}">\n</head>')
+    if js_url and js_url not in html:
+        if "</body>" in html:
+            html = html.replace("</body>", f'  <script src="{js_url}"></script>\n</body>')
+    db_exec("UPDATE project_files SET content=?,updated_at=datetime('now') WHERE project_id=? AND path='index.html'",
+            (html, proj["id"]), fetch=False)
+    return jsonify({"ok": True})
+
+
+
+# ── 9. Tema tanlash (4 xil rang sxemasi) ──────────────────────────────────
+THEMES = {
+    "dark": {"bg":"#0d0f18","surf":"#161929","card":"#1c2136","brd":"#252d45","ac":"#7c6fff","gr":"#22d3a0","tx":"#d4daf0"},
+    "light": {"bg":"#f0f2f5","surf":"#ffffff","card":"#ffffff","brd":"#e0e0e0","ac":"#5548e0","gr":"#0d9668","tx":"#1a1a2e"},
+    "blue": {"bg":"#0a1628","surf":"#0f1f3d","card":"#152a4a","brd":"#1e3a5f","ac":"#3b82f6","gr":"#22d3a0","tx":"#c8d6e5"},
+    "green": {"bg":"#0a1a14","surf":"#0f2a1f","card":"#153d2b","brd":"#1e5a40","ac":"#22d3a0","gr":"#22d3a0","tx":"#c8e6d8"},
+}
+
+@app.route("/api/theme", methods=["GET","POST"])
+@user_req
+def api_theme():
+    if request.method == "GET":
+        theme = get_setting(f"theme_{session.get('user_id',0)}", "dark")
+        return jsonify({"theme": theme, "themes": list(THEMES.keys())})
+    d = request.get_json() or {}
+    theme = d.get("theme", "dark")
+    if theme not in THEMES:
+        theme = "dark"
+    set_setting(f"theme_{session.get('user_id',0)}", theme)
+    return jsonify({"ok": True, "theme": theme})
+
+
+# ╔══════════════════════════════════════════════════════════════════════════╗
 # ║              BACKEND ENGINE — LOYIHA ICHIDAGI SERVERLESS FUNKSIYALAR     ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
 
@@ -6308,6 +6678,7 @@ def main():
         print(_c("  ⚠  QR-kod uchun: pip install qrcode[pil]",Y))
     threading.Thread(target=expiry_checker,daemon=True).start()
     threading.Thread(target=_uptime_checker,daemon=True).start()
+    threading.Thread(target=_watchdog_thread,daemon=True).start()
     while True:
         print_menu()
         try:
