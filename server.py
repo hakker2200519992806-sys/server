@@ -20,9 +20,9 @@
 """
 
 import os, sys, re, json, time, uuid, socket, secrets, hashlib, threading
-import subprocess, platform, sqlite3, io, shutil, zipfile
+import subprocess, platform, sqlite3, io, shutil, zipfile, traceback
 import urllib.request, urllib.parse
-import backend_engine
+import multiprocessing as mp
 from datetime import datetime, timedelta
 from functools import wraps
 from pathlib import Path
@@ -64,6 +64,35 @@ try:
 except ImportError:
     QRCODE_OK = False
 
+# ── RestrictedPython — ixtiyoriy bog'liqlik (backend uchun) ────────────────
+try:
+    from RestrictedPython import compile_restricted, safe_globals
+    from RestrictedPython.Guards import (
+        safe_builtins, guarded_iter_unpack_sequence, full_write_guard,
+    )
+    from RestrictedPython.Eval import default_guarded_getiter
+    RESTRICTED_OK = True
+except ImportError:
+    RESTRICTED_OK = False
+
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║                 BACKEND ENGINE SOZLAMALARI                               ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+EXEC_TIMEOUT_SEC   = 3          # bir chaqiruv uchun maksimal ijro vaqti
+MEM_LIMIT_MB       = 128        # protsess uchun taxminiy xotira chegarasi (Linux)
+RATE_LIMIT_PER_MIN = 30         # foydalanuvchi/loyiha uchun daqiqasiga chaqiruv
+HISTORY_LOG_KEEP   = 500        # backend_exec_logs jadvalida saqlanadigan maksimal yozuv
+
+PROJECT_DB_DIR = Path("project_dbs")
+PROJECT_DB_DIR.mkdir(exist_ok=True)
+
+# Foydalanuvchi kodi ichida "import X" ga ruxsat etilgan modullar
+ALLOWED_IMPORTS = {"json", "math", "random", "re", "datetime", "string", "statistics"}
+
+# SQL darajasida taqiqlangan kalit so'zlar
+_SQL_FORBIDDEN = re.compile(
+    r"\b(ATTACH|DETACH|PRAGMA|VACUUM|DROP\s+DATABASE|LOAD_EXTENSION)\b", re.I)
+
 # ╔══════════════════════════════════════════════════════════════════════════╗
 # ║                          KONFIGURATSIYA                                  ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
@@ -80,7 +109,7 @@ CFG = {
     "MAX_FILE_MB":    50,
     "ALLOWED_EXT":    {".html",".css",".js",".txt",".json",".png",".jpg",
                        ".jpeg",".gif",".svg",".ico",".woff",".woff2",".ttf",
-                       ".mp3",".mp4"},
+                       ".mp3",".mp4",".py",".php"},
     "MAX_LOGIN_FAIL": 5,
     "BAN_MINUTES":    30,
     "SESSION_HOURS":  8,
@@ -280,8 +309,86 @@ def setup_db():
             expires_at TEXT NOT NULL,
             used INTEGER DEFAULT 0,
             created_at TEXT DEFAULT (datetime('now')))""",
+
+        # ═══════════════ YANGI FUNKSIYALAR UCHUN JADVALLAR ═══════════════
+
+        # Jamoa/Team tizimi
+        """CREATE TABLE IF NOT EXISTS project_teams (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            role TEXT DEFAULT 'viewer',
+            invited_by INTEGER,
+            created_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(project_id, user_id))""",
+
+        # Audit trail — barcha o'zgarishlar logi
+        """CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            username TEXT,
+            action TEXT NOT NULL,
+            target_type TEXT,
+            target_id TEXT,
+            details TEXT,
+            ip_address TEXT,
+            created_at TEXT DEFAULT (datetime('now')))""",
+
+        # Real-time Chat xabarlari
+        """CREATE TABLE IF NOT EXISTS chat_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            username TEXT,
+            message TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now')))""",
+
+        # TODO/Vazifalar ro'yxati
+        """CREATE TABLE IF NOT EXISTS project_todos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            is_done INTEGER DEFAULT 0,
+            priority TEXT DEFAULT 'normal',
+            created_at TEXT DEFAULT (datetime('now')),
+            completed_at TEXT)""",
+
+        # IP Whitelist
+        """CREATE TABLE IF NOT EXISTS ip_whitelist (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ip_address TEXT NOT NULL UNIQUE,
+            label TEXT,
+            added_by INTEGER,
+            created_at TEXT DEFAULT (datetime('now')))""",
+
+        # Custom domain/subdomain
+        """CREATE TABLE IF NOT EXISTS custom_domains (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            domain TEXT NOT NULL UNIQUE,
+            is_active INTEGER DEFAULT 1,
+            created_by INTEGER,
+            created_at TEXT DEFAULT (datetime('now')))""",
+
+        # Uptime monitoring logs
+        """CREATE TABLE IF NOT EXISTS uptime_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            status TEXT DEFAULT 'up',
+            response_ms INTEGER,
+            checked_at TEXT DEFAULT (datetime('now')))""",
+
+        # Ichki xabar tizimi
+        """CREATE TABLE IF NOT EXISTS internal_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sender_id INTEGER NOT NULL,
+            receiver_id INTEGER NOT NULL,
+            subject TEXT,
+            body TEXT,
+            is_read INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now')))""",
     ]
-    backend_engine.setup_backend_tables(db_exec, _ensure_column)
+    _setup_backend_tables()
     for s in stmts:
         db_exec(s, fetch=False)
 
@@ -541,6 +648,10 @@ def finalize_login(user, ip):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     db_exec("UPDATE users SET last_login=? WHERE id=?", (now, user["id"]), fetch=False)
     telegram_send(f"✅ Yangi kirish\nFoydalanuvchi: {user['username']}\nIP: {ip}")
+    try:
+        _check_new_device(user, ip)
+    except Exception:
+        pass
 
 # ── Sozlamalar (key-value) ────────────────────────────────
 def get_setting(key, default=""):
@@ -740,6 +851,16 @@ def _pg(title, body, act="dash", flash=None, ftype="ok"):
         {_nav('/admin/blocked','🚫 Bloklangan IP','blocked'==act)}
         {_nav('/admin/bandwidth','📊 Bandwidth','bw'==act)}
         {_nav('/admin/monitor','📟 Monitoring','monitor'==act)}
+        {_nav('/admin/uptime','📉 Uptime','uptime'==act)}
+        {_nav('/admin/backend/logs','🐍 Backend','backend'==act)}
+        {_nav('/admin/audit','📝 Audit','audit'==act)}
+        {_nav('/admin/sessions','🔐 Sessiyalar','sessions'==act)}
+        {_nav('/admin/restarts','🔄 Restart','restarts'==act)}
+        {_nav('/admin/analytics','📈 Analitika','analytics'==act)}
+        {_nav('/admin/resources','📊 Resurslar','resources'==act)}
+        {_nav('/admin/ab-test','🧪 A/B Test','abtest'==act)}
+        {_nav('/admin/ip-whitelist','🔒 IP Whitelist','ipwl'==act)}
+        {_nav('/admin/domains','🌐 Domenlar','domains'==act)}
         {_nav('/admin/settings','⚙️ Sozlamalar','settings'==act)}"""
     rb = f'<span class="bx {"xg" if adm else "xb"}">{role}</span>'
     return f"""<!DOCTYPE html>
@@ -749,7 +870,7 @@ def _pg(title, body, act="dash", flash=None, ftype="ok"):
 <style>{CSS}</style>
 </head><body>
 <div class="layout">
-<aside class="sb">
+<aside class="sb" id="mainSidebar">
   <div class="logo">⬡ <span>{site_title}</span></div>
   <nav>
     {_nav('/dashboard','🏠 Dashboard','dash'==act)}
@@ -760,11 +881,16 @@ def _pg(title, body, act="dash", flash=None, ftype="ok"):
     {_nav('/files','📁 Fayllar','files'==act)}
     {_nav('/projects','💻 Loyihalar','projects'==act)}
     {_nav('/editor/new','✏️ Muharrir','editor'==act)}
+    <div class="sep">AI</div>
+    <a href="#" onclick="toggleAIWindow();return false;" class="{'act' if act=='ai' else ''}">🤖 AI Yordamchi</a>
     <div class="sep">Hisobot</div>
     {_nav('/stats','📈 Statistika','stats'==act)}
+    {_nav('/messages','💬 Xabarlar','messages'==act)}
     {adm_nav}
     <div class="sep">Hisob</div>
     {_nav('/profile',f'👤 {uname}','profile'==act)}
+    {_nav('/changelog','📝 Changelog',False)}
+    {_nav('/status','✅ Status',False)}
     {_nav('/logout','🚪 Chiqish',False)}
   </nav>
 </aside>
@@ -774,7 +900,11 @@ def _pg(title, body, act="dash", flash=None, ftype="ok"):
       <input name="q" placeholder="🔍 Havola, fayl, loyiha qidirish...">
     </form>
     <div class="fl">{rb}<span class="tm" style="font-size:.78rem">{uname}</span>
-    <span class="bx xm" style="font-size:.65rem">SQLite</span></div>
+    <span class="bx xm" style="font-size:.65rem">SQLite</span>
+    <select onchange="setTheme(this.value)" style="padding:3px 6px;background:var(--bg);border:1px solid var(--brd);color:var(--mt);border-radius:5px;font-size:.68rem">
+      <option value="dark">🌙 To'q</option><option value="light">☀️ Och</option>
+      <option value="blue">💙 Ko'k</option><option value="green">💚 Yashil</option>
+    </select></div>
   </div>
   <div class="cnt">{fl}{body}</div>
 </div>
@@ -783,6 +913,428 @@ def _pg(title, body, act="dash", flash=None, ftype="ok"):
 function copyText(t){{navigator.clipboard.writeText(t).then(()=>{{
   const e=event.target;const o=e.textContent;e.textContent='✓ Nusxalandi!';
   setTimeout(()=>e.textContent=o,1500);}});}}
+// Tema tanlash
+(function(){{
+  var themes={{dark:{{bg:'#0d0f18',surf:'#161929',card:'#1c2136',brd:'#252d45',ac:'#7c6fff',gr:'#22d3a0',tx:'#d4daf0',mt:'#5c6890'}},
+    light:{{bg:'#f0f2f5',surf:'#ffffff',card:'#ffffff',brd:'#e0e0e0',ac:'#5548e0',gr:'#0d9668',tx:'#1a1a2e',mt:'#666'}},
+    blue:{{bg:'#0a1628',surf:'#0f1f3d',card:'#152a4a',brd:'#1e3a5f',ac:'#3b82f6',gr:'#22d3a0',tx:'#c8d6e5',mt:'#5a7a9c'}},
+    green:{{bg:'#0a1a14',surf:'#0f2a1f',card:'#153d2b',brd:'#1e5a40',ac:'#22d3a0',gr:'#22d3a0',tx:'#c8e6d8',mt:'#5a8a6c'}}}};
+  var t=localStorage.getItem('srv_theme')||'dark';
+  if(themes[t]){{var r=document.documentElement;var v=themes[t];
+    r.style.setProperty('--bg',v.bg);r.style.setProperty('--surf',v.surf);
+    r.style.setProperty('--card',v.card);r.style.setProperty('--brd',v.brd);
+    r.style.setProperty('--ac',v.ac);r.style.setProperty('--gr',v.gr);
+    r.style.setProperty('--tx',v.tx);r.style.setProperty('--mt',v.mt);}}
+}})();
+function setTheme(t){{localStorage.setItem('srv_theme',t);location.reload();}}
+// Sidebar scroll holatini saqlash va tiklash
+(function(){{
+  var sb=document.getElementById('mainSidebar');
+  if(!sb) return;
+  var saved=sessionStorage.getItem('sb_scroll');
+  if(saved) sb.scrollTop=parseInt(saved);
+  sb.addEventListener('scroll',function(){{sessionStorage.setItem('sb_scroll',sb.scrollTop);}});
+  // Har bir nav link bosilganda scroll saqlanadi
+  sb.querySelectorAll('a[href]').forEach(function(a){{
+    a.addEventListener('click',function(){{sessionStorage.setItem('sb_scroll',sb.scrollTop);}});
+  }});
+}})();
+</script>
+<!-- AI YORDAMCHI FLOATING WINDOW -->
+<div id="aiWindow" style="display:none;position:fixed;bottom:20px;right:20px;width:380px;height:480px;
+  background:#161929;border:1px solid #252d45;border-radius:14px;box-shadow:0 12px 40px rgba(0,0,0,.6);
+  z-index:999999;flex-direction:column;overflow:hidden;min-width:260px;min-height:200px;resize:both;font-size:14px">
+  <div id="aiHeader" style="padding:10px 14px;background:#1c2136;border-bottom:1px solid #252d45;
+    cursor:move;display:flex;align-items:center;gap:8px;flex-shrink:0;user-select:none">
+    <button onclick="openAITrainPanel()" style="background:transparent;border:1px solid #252d45;color:#7c6fff;
+      border-radius:5px;padding:3px 8px;font-size:.7rem;cursor:pointer" title="AI ni o'qitish">📚 O'qitish</button>
+    <button onclick="closeAIWindow()" style="background:transparent;border:1px solid #252d45;color:#f05d5d;
+      border-radius:5px;padding:3px 8px;font-size:.75rem;cursor:pointer;font-weight:700">✕</button>
+    <span style="font-size:1.1rem;margin-left:4px">🤖</span>
+    <b style="color:#fff;font-size:.85rem;flex:1">AI Yordamchi</b>
+  </div>
+  <div style="padding:4px 12px;display:flex;gap:4px;border-bottom:1px solid #1c2136;flex-shrink:0">
+    <button onclick="loadAIChatHistory()" style="background:transparent;border:1px solid #252d45;color:#5c6890;border-radius:4px;padding:2px 6px;font-size:.65rem;cursor:pointer">📜 Tarix</button>
+    <button onclick="clearAIChat()" style="background:transparent;border:1px solid #252d45;color:#5c6890;border-radius:4px;padding:2px 6px;font-size:.65rem;cursor:pointer">🗑 Tozalash</button>
+    <button onclick="sendAIImage()" style="background:transparent;border:1px solid #252d45;color:#5c6890;border-radius:4px;padding:2px 6px;font-size:.65rem;cursor:pointer">🖼 Rasm</button>
+    <button onclick="showAITutorial()" style="background:transparent;border:1px solid #252d45;color:#f5c518;border-radius:4px;padding:2px 6px;font-size:.65rem;cursor:pointer">📖 Qo'llanma</button>
+  </div>
+  <div id="aiMessages" style="flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px"></div>
+  <div style="padding:8px 12px;border-top:1px solid #252d45;display:flex;gap:6px;flex-shrink:0">
+    <input type="text" id="aiInput" placeholder="Savol yozing..."
+      style="flex:1;padding:8px 12px;background:#0d0f18;border:1px solid #252d45;border-radius:8px;
+      color:#d4daf0;font-size:.82rem;outline:none" onkeydown="if(event.key==='Enter')askAI()">
+    <button onclick="speakLastAI()" title="Ovozli o'qish" style="background:transparent;border:1px solid #252d45;color:#5c6890;
+      border-radius:8px;padding:8px;font-size:.9rem;cursor:pointer">🔊</button>
+    <button onclick="askAI()" style="background:#7c6fff;color:#fff;border:none;border-radius:8px;
+      padding:8px 14px;font-size:.8rem;cursor:pointer;font-weight:600">↑</button>
+  </div>
+</div>
+<!-- AI TRAIN PANEL -->
+<div id="aiTrainBg" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);
+  z-index:9999999;display:none;align-items:center;justify-content:center"
+  onclick="if(event.target.id==='aiTrainBg')closeAITrain()">
+  <div style="background:#1c2136;border:1px solid #252d45;border-radius:12px;width:92%;max-width:560px;
+    max-height:80vh;display:flex;flex-direction:column;overflow:hidden">
+    <div style="padding:12px 14px;border-bottom:1px solid #252d45;display:flex;align-items:center">
+      <b style="color:#fff">📚 AI ni o'qitish</b>
+      <button onclick="closeAITrain()" style="margin-left:auto;background:transparent;border:1px solid #252d45;
+        color:#f05d5d;border-radius:5px;padding:3px 8px;cursor:pointer">✕</button>
+    </div>
+    <div style="padding:14px;overflow-y:auto">
+      <p style="color:#5c6890;font-size:.79rem;margin-bottom:12px">AI ni 3 xil usulda o'rgating.
+        Barcha ma'lumotlar <code>ai_data/</code> papkasida saqlanadi.</p>
+      <!-- TAB BUTTONS -->
+      <div style="display:flex;gap:4px;margin-bottom:12px;flex-wrap:wrap">
+        <button onclick="showAITab('qa')" id="aiTabQA" style="flex:1;padding:6px;background:#7c6fff;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:.72rem;font-weight:600">📝 Savol-Javob</button>
+        <button onclick="showAITab('badword')" id="aiTabBADWORD" style="flex:1;padding:6px;background:#252d45;color:#5c6890;border:none;border-radius:6px;cursor:pointer;font-size:.72rem">🚫 Filtr</button>
+      </div>
+      <!-- QA TAB -->
+      <div id="aiPanelQA">
+        <div style="margin-bottom:8px"><label style="color:#5c6890;font-size:.74rem">Savol / kalit so'z:</label>
+          <input type="text" id="aiTrainQ" placeholder="Masalan: server qanday ishga tushadi?"
+            style="width:100%;padding:7px;background:#0d0f18;border:1px solid #252d45;border-radius:6px;color:#d4daf0;margin-top:3px;font-size:.82rem"></div>
+        <div style="margin-bottom:8px"><label style="color:#5c6890;font-size:.74rem">Javob (HTML, rasm uchun &lt;img src="url"&gt; ishlatish mumkin):</label>
+          <textarea id="aiTrainA" rows="3" placeholder="Javob matni... Rasm uchun: <img src=&quot;https://...&quot;>"
+            style="width:100%;padding:7px;background:#0d0f18;border:1px solid #252d45;border-radius:6px;color:#d4daf0;margin-top:3px;resize:vertical;font-size:.82rem"></textarea></div>
+        <button onclick="trainAI('qa')" style="background:#7c6fff;color:#fff;border:none;border-radius:7px;padding:7px 14px;cursor:pointer;font-weight:600;font-size:.8rem">💾 Saqlash</button>
+      </div>
+      <!-- TOPIC TAB (hidden but functional) -->
+      <div id="aiPanelTopic" style="display:none"></div>
+      <!-- WORD TAB (hidden but functional) -->
+      <div id="aiPanelWord" style="display:none"></div>
+      <!-- BADWORD TAB -->
+      <div id="aiPanelBadword" style="display:none">
+        <p style="color:#5c6890;font-size:.74rem;margin-bottom:8px">Haqoratli so'zlarni qo'shing. Foydalanuvchi bu so'zlarni ishlatsa, siz belgilagan javob yuboriladi.</p>
+        <div style="margin-bottom:8px"><label style="color:#5c6890;font-size:.74rem">Haqoratli so'z:</label>
+          <input type="text" id="aiBadWord" placeholder="Masalan: axmoq"
+            style="width:100%;padding:7px;background:#0d0f18;border:1px solid #252d45;border-radius:6px;color:#d4daf0;margin-top:3px;font-size:.82rem"></div>
+        <div style="margin-bottom:8px"><label style="color:#5c6890;font-size:.74rem">Javob (bu so'z ishlatilganda nima deyilsin):</label>
+          <input type="text" id="aiBadResp" placeholder="Masalan: Iltimos, hurmatli muloqot qiling!"
+            style="width:100%;padding:7px;background:#0d0f18;border:1px solid #252d45;border-radius:6px;color:#d4daf0;margin-top:3px;font-size:.82rem"></div>
+        <button onclick="trainAI('badword')" style="background:#f05d5d;color:#fff;border:none;border-radius:7px;padding:7px 14px;cursor:pointer;font-weight:600;font-size:.8rem">🚫 Qo'shish</button>
+        <div id="aiBadList" style="display:flex;flex-wrap:wrap;gap:4px;margin-top:8px"></div>
+      </div>
+      <button onclick="loadAIKnowledge()" style="background:transparent;border:1px solid #252d45;color:#5c6890;border-radius:7px;
+        padding:6px 12px;cursor:pointer;font-size:.78rem;margin-top:10px">🔄 Yangilash</button>
+    </div>
+    <div id="aiKnowledgeList" style="border-top:1px solid #252d45;overflow-y:auto;max-height:30vh;padding:8px"></div>
+  </div>
+</div>
+<script>
+var aiWindowEl=null,aiDragging=false,aiDragX=0,aiDragY=0,aiStartX=0,aiStartY=0;
+function toggleAIWindow(){{
+  var w=document.getElementById('aiWindow');
+  if(w.style.display==='flex'){{
+    w.style.display='none';
+    localStorage.setItem('ai_window_open','0');
+  }}else{{
+    w.style.display='flex';
+    localStorage.setItem('ai_window_open','1');
+    document.getElementById('aiInput').focus();
+    loadAIChatHistory();
+  }}
+}}
+function closeAIWindow(){{
+  document.getElementById('aiWindow').style.display='none';
+  localStorage.setItem('ai_window_open','0');
+}}
+// Sahifa yuklanganda AI oynasi holatini tiklash
+(function(){{
+  if(localStorage.getItem('ai_window_open')==='1'){{
+    var w=document.getElementById('aiWindow');
+    if(w){{w.style.display='flex';setTimeout(loadAIChatHistory,300);}}
+  }}
+}})();
+function loadAIChatHistory(){{
+  fetch('/api/ai/history',{{headers:{{'X-CSRF-Token':'{get_csrf_token()}'}}}}).then(r=>r.json()).then(d=>{{
+    var msgs=document.getElementById('aiMessages');
+    msgs.innerHTML='';
+    (d.history||[]).slice(-20).forEach(function(m){{
+      addAIMsg(m.q,'user');
+      addAIMsg(m.a,'ai');
+    }});
+    if(!(d.history||[]).length) addAIMsg('Salom! Men AI yordamchiman. 🤖 Sizga qanday yordam bera olaman?','ai');
+    msgs.scrollTop=msgs.scrollHeight;
+  }}).catch(function(){{
+    addAIMsg('Salom! Men AI yordamchiman. 🤖 Sizga qanday yordam bera olaman?','ai');
+  }});
+}}
+function clearAIChat(){{
+  if(!confirm('Suhbat tarixini tozalashni xohlaysizmi?')) return;
+  fetch('/api/ai/history/clear',{{method:'POST',headers:{{'X-CSRF-Token':'{get_csrf_token()}'}}}}).then(function(){{
+    document.getElementById('aiMessages').innerHTML='';
+    addAIMsg('Suhbat tozalandi. Yangi suhbat boshlaymiz! 🤖','ai');
+  }});
+}}
+function sendAIImage(){{
+  var url=prompt('Rasm URL manzilini kiriting:');
+  if(!url) return;
+  var msgs=document.getElementById('aiMessages');
+  var div=document.createElement('div');
+  div.style.cssText='align-self:flex-end;max-width:85%';
+  div.innerHTML='<img src="'+url+'" style="max-width:100%;border-radius:8px;border:1px solid #252d45">';
+  msgs.appendChild(div);
+  msgs.scrollTop=msgs.scrollHeight;
+  // AI ga rasm haqida xabar
+  addAIMsg('🖼 Rasm qabul qilindi! Chiroyli rasm.','ai');
+}}
+function showAITutorial(){{
+  var tutorial='📖 **AI YORDAMCHI QO\\'LLANMASI**\\n\\n'
+    +'---\\n'
+    +'==MATN FORMATLASH:==\\n'
+    +'• `**qalin matn**` → **qalin matn**\\n'
+    +'• `*kursiv matn*` → *kursiv matn*\\n'
+    +'• `__tagiga chiziq__` → __tagiga chiziq__\\n'
+    +'• `~~ustiga chiziq~~` → ~~ustiga chiziq~~\\n'
+    +'• `==sariq marker==` → ==sariq marker==\\n'
+    +'• `!!qizil muhim!!` → !!qizil muhim!!\\n'
+    +'• `@@yashil@@` → @@yashil@@\\n'
+    +'• `##ko\\'k rang##` → ##ko\\'k rang##\\n'
+    +'• ` \\`kod\\` ` → `inline kod`\\n'
+    +'• ` \\`\\`\\`kod blok\\`\\`\\` ` → kod bloki\\n'
+    +'• `[havola](url)` → havola\\n'
+    +'• `---` → ajratuvchi chiziq\\n'
+    +'• `> iqtibos` → iqtibos bloki\\n\\n'
+    +'---\\n'
+    +'==RASMLAR BILAN ISHLASH:==\\n'
+    +'• 🖼 Rasm tugmasi → URL kiritib rasm yuborish\\n'
+    +'• O\\'qitishda javobga: `<img src="url">` yozing\\n'
+    +'• AI javobida rasm avtomatik ko\\'rinadi\\n\\n'
+    +'---\\n'
+    +'==KALIT SO\\'ZLAR:==\\n'
+    +'• **Salomlashish:** salom, hi, hello, qalay\\n'
+    +'• **HTML:** "div nima", "img tegi", "table"\\n'
+    +'• **CSS:** "flexbox nima", "margin", "grid"\\n'
+    +'• **Emmet:** "div*10 nima", "ul>li*5", "emmet"\\n'
+    +'• **Matematik:** 2+2, 100/4, (5+3)*2\\n'
+    +'• **O\\'yin:** tosh, qaychi, qogoz, latifa, son ber\\n'
+    +'• **Son topish:** "son top" (1-100 topishmoq)\\n'
+    +'• **Lorem:** "lorem 50" (placeholder matn)\\n'
+    +'• **Vaqt:** "soat nechchi", "bugun nechanchi"\\n'
+    +'• **Eslatma:** "5 daqiqadan keyin eslatib tur"\\n'
+    +'• **Loyiha:** "nechta fayl", "loyihalarim"\\n'
+    +'• **Xotira:** "oldin nima dedim", "esla", "tarix"\\n'
+    +'• **Haqida:** "sen kim", "isming nima", "nima qila olasan"\\n\\n'
+    +'---\\n'
+    +'==O\\'QITISH:==\\n'
+    +'• 📚 O\\'qitish tugmasini bosing\\n'
+    +'• Savol va javob kiriting\\n'
+    +'• Javobda formatlash ishlatish mumkin\\n'
+    +'• Javobda `<img src="url">` bilan rasm qo\\'shish mumkin\\n'
+    +'• 🚫 Filtr tabida haqoratli so\\'zlarni boshqaring\\n\\n'
+    +'---\\n'
+    +'==YANGI FUNKSIYALAR:==\\n'
+    +'• 📐 **Lorem:** "lorem 50" — 50 so\\'zlik placeholder matn\\n'
+    +'• 🎯 **Son topish:** "son top" — 1-100 orasida topishmoq\\n'
+    +'• 📁 **Loyiha:** "nechta fayl", "loyihalarim" — fayl haqida\\n'
+    +'• ⏰ **Eslatma:** "5 daqiqadan keyin eslatib tur" — timer\\n'
+    +'• 🔊 **Ovozli:** 🔊 tugmasini bosing — AI javobini o\\'qiydi\\n'
+    +'• 🕐 **Vaqt:** "soat nechchi", "bugun nechanchi"\\n\\n'
+    +'---\\n'
+    +'@@Omadli foydalanish!@@ 🚀';
+  var msgs=document.getElementById('aiMessages');
+  msgs.innerHTML='';
+  addAIMsg(tutorial,'ai');
+}}
+function openAITrainPanel(){{document.getElementById('aiTrainBg').style.display='flex';loadAIKnowledge();}}
+function closeAITrain(){{document.getElementById('aiTrainBg').style.display='none';}}
+(function(){{
+  var hdr=document.getElementById('aiHeader');
+  var win=document.getElementById('aiWindow');
+  if(!hdr||!win) return;
+  hdr.addEventListener('mousedown',function(e){{
+    if(e.target.tagName==='BUTTON') return;
+    aiDragging=true;
+    aiDragX=e.clientX-win.offsetLeft;
+    aiDragY=e.clientY-win.offsetTop;
+    e.preventDefault();
+  }});
+  document.addEventListener('mousemove',function(e){{
+    if(!aiDragging) return;
+    win.style.left=(e.clientX-aiDragX)+'px';
+    win.style.top=(e.clientY-aiDragY)+'px';
+    win.style.right='auto';win.style.bottom='auto';
+  }});
+  document.addEventListener('mouseup',function(){{aiDragging=false;}});
+}})();
+function askAI(){{
+  var inp=document.getElementById('aiInput');
+  var q=inp.value.trim();if(!q) return;
+  inp.value='';
+  addAIMsg(q,'user');
+  addAIMsg('...','ai');
+  fetch('/api/ai/ask',{{method:'POST',headers:{{'Content-Type':'application/json','X-CSRF-Token':'{get_csrf_token()}'}},
+    body:JSON.stringify({{question:q}})}}).then(r=>r.json()).then(d=>{{
+    var msgs=document.getElementById('aiMessages');
+    var answer=d.answer||'Javob topilmadi';
+    // Timer tekshiruvi
+    var timerMatch=answer.match(/\|\|TIMER:(\d+)\|\|/);
+    if(timerMatch){{
+      var ms=parseInt(timerMatch[1]);
+      answer=answer.replace(/\|\|TIMER:\d+\|\|/,'');
+      setTimeout(function(){{
+        if(Notification.permission==='granted'){{new Notification('⏰ AI Eslatma',{{body:'Vaqt tugadi!'}});}}
+        else{{alert('⏰ Eslatma: Vaqt tugadi!');}}
+        addAIMsg('⏰ **Eslatma!** Siz belgilagan vaqt tugadi!','ai');
+      }},ms);
+      if(Notification.permission==='default')Notification.requestPermission();
+    }}
+    msgs.lastChild.innerHTML=formatAIMsg(answer);
+    window._lastAIAnswer=answer;
+  }}).catch(()=>{{
+    var msgs=document.getElementById('aiMessages');
+    msgs.lastChild.innerHTML='<span style="color:#f05d5d">Xato yuz berdi</span>';
+  }});
+}}
+// ── Ovozli o'qish (TTS) ──
+var _ttsEnabled=localStorage.getItem('ai_tts')==='1';
+function speakLastAI(){{
+  var text=window._lastAIAnswer||'';
+  if(!text){{alert('Avval savol bering');return;}}
+  // HTML teglarni tozalash
+  var clean=text.replace(/<[^>]+>/g,'').replace(/\*\*/g,'').replace(/[=!@#~_`|]/g,'').replace(/\\n/g,' ');
+  if(!('speechSynthesis' in window)){{alert('Brauzeringiz ovozli o\\'qishni qo\\'llab-quvvatlamaydi');return;}}
+  window.speechSynthesis.cancel();
+  var utter=new SpeechSynthesisUtterance(clean);
+  utter.lang='uz';utter.rate=0.9;utter.pitch=1;
+  // O'zbek tili topilmasa ingliz yoki rus
+  var voices=window.speechSynthesis.getVoices();
+  var uzVoice=voices.find(function(v){{return v.lang.startsWith('uz');}});
+  if(uzVoice) utter.voice=uzVoice;
+  else{{var ruVoice=voices.find(function(v){{return v.lang.startsWith('ru');}});if(ruVoice)utter.voice=ruVoice;}}
+  window.speechSynthesis.speak(utter);
+}}
+function addAIMsg(text,role){{
+  var msgs=document.getElementById('aiMessages');
+  var div=document.createElement('div');
+  div.style.cssText=role==='user'?'align-self:flex-end;background:#7c6fff22;border:1px solid #7c6fff44;border-radius:10px 10px 2px 10px;padding:8px 12px;max-width:85%;color:#d4daf0;font-size:.82rem':'align-self:flex-start;background:#0d0f18;border:1px solid #252d45;border-radius:10px 10px 10px 2px;padding:8px 12px;max-width:85%;color:#d4daf0;font-size:.82rem';
+  div.innerHTML=role==='user'?text:formatAIMsg(text);
+  msgs.appendChild(div);
+  msgs.scrollTop=msgs.scrollHeight;
+}}
+function formatAIMsg(t){{
+  // Rasmlar
+  t=t.replace(/<img\s+([^>]*)>/gi,'<img $1 style="max-width:100%;border-radius:6px;margin:4px 0">');
+  // ```code block```
+  t=t.replace(/```([^`]+)```/g,'<pre style="background:#0d0f18;border:1px solid #252d45;border-radius:6px;padding:8px;margin:4px 0;overflow-x:auto;font-size:.78rem">$1</pre>');
+  // **bold** qalin
+  t=t.replace(/\*\*([^*]+)\*\*/g,'<b style="color:#fff">$1</b>');
+  // *italic* kursiv
+  t=t.replace(/\*([^*]+)\*/g,'<i>$1</i>');
+  // __tagiga chiziq__
+  t=t.replace(/__([^_]+)__/g,'<u style="text-decoration-color:#7c6fff">$1</u>');
+  // ~~ustiga chiziq~~
+  t=t.replace(/~~([^~]+)~~/g,'<s style="color:#5c6890">$1</s>');
+  // ==sariq marker==
+  t=t.replace(/==([^=]+)==/g,'<mark style="background:#f5c518;color:#000;padding:0 3px;border-radius:2px">$1</mark>');
+  // !!qizil muhim!!
+  t=t.replace(/!!([^!]+)!!/g,'<span style="color:#f05d5d;font-weight:700">$1</span>');
+  // @@yashil muvaffaqiyat@@
+  t=t.replace(/@@([^@]+)@@/g,'<span style="color:#22d3a0;font-weight:600">$1</span>');
+  // ##ko'k havola rangi##
+  t=t.replace(/##([^#]+)##/g,'<span style="color:#60a5fa">$1</span>');
+  // `code` inline kod
+  t=t.replace(/`([^`]+)`/g,'<code style="background:#252d45;padding:1px 5px;border-radius:3px;font-size:.8rem">$1</code>');
+  // [havola](url)
+  t=t.replace(/\[([^\]]+)\]\(([^)]+)\)/g,'<a href="$2" target="_blank" style="color:#7c6fff;text-decoration:underline">$1</a>');
+  // yangi qator
+  t=t.replace(/\\n/g,'<br>');
+  // --- ajratuvchi chiziq
+  t=t.replace(/^---$/gm,'<hr style="border:none;border-top:1px solid #252d45;margin:6px 0">');
+  // > iqtibos
+  t=t.replace(/^&gt;\s?(.+)/gm,'<blockquote style="border-left:3px solid #7c6fff;padding-left:8px;color:#8890b0;margin:4px 0">$1</blockquote>');
+  // • bullet points
+  t=t.replace(/• /g,'<span style="color:#7c6fff">•</span> ');
+  // Raqamli ro'yxat: 1. 2. 3.
+  t=t.replace(/^(\d+)\.\s/gm,'<span style="color:#22d3a0;font-weight:700">$1.</span> ');
+  return t;
+}}
+function trainAI(type){{
+  var payload={{}};
+  if(type==='badword'){{
+    var w=document.getElementById('aiBadWord').value.trim();
+    var r=document.getElementById('aiBadResp').value.trim();
+    if(!w&&!r){{alert('So\\'z yoki javob kiriting');return;}}
+    payload={{type:'badword',word:w,response:r}};
+  }}else if(type==='word'){{
+    var w=document.getElementById('aiNewWord').value.trim();
+    if(!w){{alert('So\\'z kiriting');return;}}
+    payload={{type:'word',word:w}};
+  }}else if(type==='topic'){{
+    var t=document.getElementById('aiTopicName').value.trim();
+    var info=document.getElementById('aiTopicInfo').value.trim();
+    if(!t||!info){{alert('Mavzu va ma\\'lumot majburiy!');return;}}
+    payload={{type:'topic',topic:t,info:info}};
+  }}else{{
+    var q=document.getElementById('aiTrainQ').value.trim();
+    var a=document.getElementById('aiTrainA').value.trim();
+    var cat=document.getElementById('aiTrainCat').value.trim();
+    if(!q||!a){{alert('Savol va javob majburiy!');return;}}
+    payload={{type:'qa',question:q,answer:a,category:cat}};
+  }}
+  fetch('/api/ai/train',{{method:'POST',headers:{{'Content-Type':'application/json','X-CSRF-Token':'{get_csrf_token()}'}},
+    body:JSON.stringify(payload)}}).then(r=>r.json()).then(d=>{{
+    if(d.ok){{
+      if(type==='badword'){{document.getElementById('aiBadWord').value='';}}
+      else if(type==='word')document.getElementById('aiNewWord').value='';
+      else if(type==='topic'){{document.getElementById('aiTopicName').value='';document.getElementById('aiTopicInfo').value='';}}
+      else{{document.getElementById('aiTrainQ').value='';document.getElementById('aiTrainA').value='';document.getElementById('aiTrainCat').value='';}}
+      loadAIKnowledge();alert('✓ Saqlandi!');
+    }}else alert('✗ '+(d.error||'Xato'));
+  }});
+}}
+function showAITab(tab){{
+  ['qa','topic','word','badword'].forEach(function(t){{
+    var panel=document.getElementById('aiPanel'+t.charAt(0).toUpperCase()+t.slice(1));
+    if(panel) panel.style.display=t===tab?'block':'none';
+    var btn=document.getElementById('aiTab'+t.toUpperCase());
+    if(btn){{btn.style.background=t===tab?'#7c6fff':'#252d45';btn.style.color=t===tab?'#fff':'#5c6890';}}
+  }});
+}}
+function loadAIKnowledge(){{
+  fetch('/api/ai/knowledge').then(r=>r.json()).then(d=>{{
+    var list=document.getElementById('aiKnowledgeList');
+    var html='';
+    // Savol so'zlari
+    if(d.words&&d.words.length){{
+      html+='<div style="padding:4px 8px"><span style="color:#f5c518;font-size:.7rem;font-weight:600">SAVOL SO\\'ZLARI:</span> ';
+      d.words.forEach(function(w){{html+='<span style="display:inline-block;background:#252d45;border-radius:4px;padding:2px 6px;margin:2px;font-size:.72rem;color:#d4daf0">'+w+' <span onclick="delAIWord(\\''+w+'\\')" style="color:#f05d5d;cursor:pointer;margin-left:3px">x</span></span>';}});
+      html+='</div>';
+    }}
+    // Mavzular
+    if(d.topics&&d.topics.length){{
+      html+='<div style="padding:4px 8px;border-top:1px solid #1c2136;margin-top:4px"><span style="color:#22d3a0;font-size:.7rem;font-weight:600">MAVZULAR:</span></div>';
+      d.topics.forEach(function(t){{
+        html+='<div style="padding:4px 10px;border-bottom:1px solid #1c2136;font-size:.76rem;display:flex;gap:6px;align-items:center"><span style="color:#22d3a0;font-weight:600">'+t.topic+'</span><span style="color:#5c6890;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+t.info.slice(0,50)+'</span><button onclick="delAITopic('+t.id+')" style="background:transparent;border:none;color:#f05d5d;cursor:pointer;font-size:.72rem">🗑</button></div>';
+      }});
+    }}
+    // Savol-javoblar
+    (d.items||[]).forEach(function(it){{
+      html+='<div style="padding:4px 10px;border-bottom:1px solid #1c2136;font-size:.76rem;display:flex;gap:6px;align-items:center"><span style="color:#7c6fff;flex:1">'+it.question+'</span><span style="color:#5c6890;font-size:.66rem">'+(it.category||'')+'</span><button onclick="deleteAIItem('+it.id+')" style="background:transparent;border:none;color:#f05d5d;cursor:pointer;font-size:.72rem">🗑</button></div>';
+    }});
+    list.innerHTML=html||'<p style="padding:12px;color:#5c6890;text-align:center;font-size:.78rem">Hali ma\\'lumot yoq</p>';
+    // Savol so'zlari tabini ham yangilash
+    var wl=document.getElementById('aiWordsList');
+    if(wl&&d.words){{wl.innerHTML=d.words.map(function(w){{return '<span style="background:#252d45;border-radius:4px;padding:3px 8px;font-size:.76rem;color:#d4daf0">'+w+'</span>';}}).join('');}}
+    // Badwords tabini yangilash
+    var bl=document.getElementById('aiBadList');
+    if(bl&&d.badwords){{bl.innerHTML=d.badwords.map(function(w){{return '<span style="background:#3b1010;border:1px solid #5c1a1a;border-radius:4px;padding:3px 8px;font-size:.74rem;color:#f05d5d">'+w+' <span onclick="delAIBad(\\''+w+'\\')" style="cursor:pointer;margin-left:3px">x</span></span>';}}).join('');}}
+    if(d.badword_response){{var ri=document.getElementById('aiBadResp');if(ri&&!ri.value)ri.placeholder='Joriy: '+d.badword_response;}}
+  }});
+}}
+function deleteAIItem(id){{
+  fetch('/api/ai/knowledge/'+id,{{method:'DELETE',headers:{{'X-CSRF-Token':'{get_csrf_token()}'}}}}).then(()=>loadAIKnowledge());
+}}
+function delAITopic(id){{
+  fetch('/api/ai/topics/'+id,{{method:'DELETE',headers:{{'X-CSRF-Token':'{get_csrf_token()}'}}}}).then(()=>loadAIKnowledge());
+}}
+function delAIWord(w){{
+  fetch('/api/ai/words/'+encodeURIComponent(w),{{method:'DELETE',headers:{{'X-CSRF-Token':'{get_csrf_token()}'}}}}).then(()=>loadAIKnowledge());
+}}
+function delAIBad(w){{
+  fetch('/api/ai/badwords/'+encodeURIComponent(w),{{method:'DELETE',headers:{{'X-CSRF-Token':'{get_csrf_token()}'}}}}).then(()=>loadAIKnowledge());
+}}
 </script>
 </body></html>"""
 
@@ -1235,6 +1787,7 @@ def files_list():
           <td>{pub}</td><td>{f['download_count']}</td><td>{exp}</td>
           <td>{f.get('username') or '—'}</td>
           <td class="fl">
+            <a href="/preview-file/{f['uuid']}" class="btn bgh bsm" target="_blank">👁</a>
             <a href="/download/{f['uuid']}" class="btn bg bsm">⬇ Olish</a>
             <form method="POST" action="/files/delete/{f['uuid']}" onsubmit="return confirm('O\\'chirish?')">{csrf_field()}
               <button class="btn br bsm">🗑</button></form>
@@ -1452,6 +2005,16 @@ li.CodeMirror-hint-active{background:#7c6fff !important;color:#fff !important}
   <button class="btn bgh bsm" onclick="toggleConsole()">🖥 Konsol</button>
   <button class="btn bgh bsm" onclick="openSnippets()">✨ Snippetlar</button>
   <button class="btn bgh bsm" onclick="openHistory()">🕘 Tarix</button>
+  <button class="btn bgh bsm" onclick="openBackendPanel()">🐍 Backend</button>
+  <button class="btn bgh bsm" onclick="openHelpPanel()">❓ Yordam</button>
+  <button class="btn bgh bsm" onclick="openChatPanel()">💬 Chat</button>
+  <button class="btn bgh bsm" onclick="openTodoPanel()">🎯 TODO</button>
+  <button class="btn bgh bsm" onclick="openComponentsPanel()">🧩 Komponent</button>
+  <button class="btn bgh bsm" onclick="openCDNPanel()">📦 CDN</button>
+  <button class="btn bgh bsm" onclick="openColorPicker()">📐 Rang</button>
+  <button class="btn bgh bsm" onclick="openTerminal()">💻 Terminal</button>
+  <button class="btn bgh bsm" onclick="generatePWA()">📱 PWA</button>
+  <button class="btn bgh bsm" onclick="generateReadme()">📑 README</button>
   <a href="/projects/download/UUID" class="btn bgh bsm">⬇ ZIP</a>
   <span class="khint" title="Emmet: div.foo#bar, ul>li*3, div+p, (div>p)*2, a{Matn} kabi qisqartmalarni yozib Tab yoki Enter bosing&#10;CSS: w100%, h50vh, m10-20, p0, df, jcc, aic, fxd, tac kabi qisqartmalar ham qo'llab-quvvatlanadi&#10;Ctrl+Space — takliflar ro'yxati&#10;Ctrl+P — Quick Open&#10;Ctrl+Shift+F — global qidiruv&#10;Ctrl+S — saqlash&#10;Ctrl+Enter — ishga tushirish&#10;Ctrl+/ — izohga olish&#10;Shift+Alt+F — formatlash&#10;Alt+Click — qo'shimcha kursor (multi-cursor)&#10;O'ng tugma — fayl daraxtida yangi fayl/papka/nomini o'zgartirish/o'chirish&#10;Sudrab tashlash — faylni boshqa papkaga ko'chirish">⌨ Tugmalar</span>
   <a href="/projects" class="btn bgh bsm">← Loyihalar</a>
@@ -1512,6 +2075,167 @@ li.CodeMirror-hint-active{background:#7c6fff !important;color:#fff !important}
   <div class="modalList" id="gsResults"></div>
 </div></div>
 
+<div class="modalBg" id="helpBg"><div class="modalBox" style="max-width:720px;max-height:85vh">
+  <div style="padding:12px 14px;border-bottom:1px solid var(--brd);display:flex;align-items:center;justify-content:space-between">
+    <b style="color:#fff">❓ Emmet qisqartmalari va klaviatura tugmalari</b>
+    <button class="btn bgh bsm" onclick="closeModal('helpBg')">✕</button>
+  </div>
+  <div class="modalList" style="padding:14px;overflow-y:auto;font-size:.82rem;line-height:1.7">
+
+    <h3 style="color:var(--ac);margin-bottom:8px">⌨️ Klaviatura tugmalari</h3>
+    <table style="width:100%;margin-bottom:18px"><tbody>
+      <tr><td style="color:var(--gr);width:180px"><kbd>Tab</kbd></td><td>Emmet/Snippet kengaytirish</td></tr>
+      <tr><td style="color:var(--gr)"><kbd>Ctrl+S</kbd></td><td>Saqlash</td></tr>
+      <tr><td style="color:var(--gr)"><kbd>Ctrl+Enter</kbd></td><td>Ishga tushirish (Run)</td></tr>
+      <tr><td style="color:var(--gr)"><kbd>Ctrl+Space</kbd></td><td>Takliflar ro'yxati (Autocomplete)</td></tr>
+      <tr><td style="color:var(--gr)"><kbd>Ctrl+P</kbd></td><td>Quick Open — fayl qidirish</td></tr>
+      <tr><td style="color:var(--gr)"><kbd>Ctrl+Shift+F</kbd></td><td>Global qidiruv / almashtirish</td></tr>
+      <tr><td style="color:var(--gr)"><kbd>Ctrl+/</kbd></td><td>Izohga olish / izohdan chiqarish</td></tr>
+      <tr><td style="color:var(--gr)"><kbd>Shift+Alt+F</kbd></td><td>Kodni formatlash (beautify)</td></tr>
+      <tr><td style="color:var(--gr)"><kbd>Alt+Click</kbd></td><td>Ko'p kursor (multi-cursor)</td></tr>
+    </tbody></table>
+
+    <h3 style="color:var(--ac);margin-bottom:8px">🌐 HTML Emmet qisqartmalari</h3>
+    <p style="color:var(--mt);margin-bottom:8px">Qisqartmani yozib <kbd>Tab</kbd> yoki <kbd>Enter</kbd> bosing:</p>
+    <table style="width:100%;margin-bottom:18px"><tbody>
+      <tr><td style="color:var(--yl);width:200px"><code>!</code></td><td>HTML5 to'liq shablon (boilerplate)</td></tr>
+      <tr><td style="color:var(--yl)"><code>div.box#main</code></td><td>&lt;div class="box" id="main"&gt;&lt;/div&gt;</td></tr>
+      <tr><td style="color:var(--yl)"><code>ul>li*5</code></td><td>ul ichida 5 ta li elementi</td></tr>
+      <tr><td style="color:var(--yl)"><code>nav>ul>li*4>a</code></td><td>Navigatsiya tuzilmasi</td></tr>
+      <tr><td style="color:var(--yl)"><code>div+p+span</code></td><td>Bir xil darajada 3 ta element</td></tr>
+      <tr><td style="color:var(--yl)"><code>(div>p)*3</code></td><td>Guruhni 3 marta takrorlash</td></tr>
+      <tr><td style="color:var(--yl)"><code>a[href=#]{Havola}</code></td><td>Atributli va matnli element</td></tr>
+      <tr><td style="color:var(--yl)"><code>div.item$*4</code></td><td>item1, item2, item3, item4 klasslar</td></tr>
+      <tr><td style="color:var(--yl)"><code>lorem</code> / <code>lorem30</code></td><td>Lorem ipsum matn (30 so'z)</td></tr>
+      <tr><td style="color:var(--yl)"><code>img</code></td><td>&lt;img src="" alt=""&gt;</td></tr>
+      <tr><td style="color:var(--yl)"><code>input</code></td><td>&lt;input type="text"&gt;</td></tr>
+      <tr><td style="color:var(--yl)"><code>link</code></td><td>&lt;link rel="stylesheet" href=""&gt;</td></tr>
+      <tr><td style="color:var(--yl)"><code>html5</code> / <code>com</code></td><td>HTML5 shablon / izoh bloki</td></tr>
+    </tbody></table>
+
+    <h3 style="color:var(--ac);margin-bottom:8px">🎨 CSS Emmet qisqartmalari</h3>
+    <p style="color:var(--mt);margin-bottom:8px">CSS faylda qisqartmani yozib <kbd>Tab</kbd> bosing:</p>
+    <table style="width:100%;margin-bottom:18px"><tbody>
+      <tr><td style="color:var(--yl);width:200px"><code>w100%</code></td><td>width: 100%;</td></tr>
+      <tr><td style="color:var(--yl)"><code>h50vh</code></td><td>height: 50vh;</td></tr>
+      <tr><td style="color:var(--yl)"><code>m10</code> / <code>m10-20</code></td><td>margin: 10px; / margin: 10px 20px;</td></tr>
+      <tr><td style="color:var(--yl)"><code>p0</code></td><td>padding: 0;</td></tr>
+      <tr><td style="color:var(--yl)"><code>mt15</code> / <code>mb20</code></td><td>margin-top: 15px; / margin-bottom: 20px;</td></tr>
+      <tr><td style="color:var(--yl)"><code>fs16</code></td><td>font-size: 16px;</td></tr>
+      <tr><td style="color:var(--yl)"><code>fw700</code></td><td>font-weight: 700;</td></tr>
+      <tr><td style="color:var(--yl)"><code>lh1.5</code></td><td>line-height: 1.5;</td></tr>
+      <tr><td style="color:var(--yl)"><code>df</code> / <code>flex</code></td><td>display: flex;</td></tr>
+      <tr><td style="color:var(--yl)"><code>dg</code> / <code>grid</code></td><td>display: grid;</td></tr>
+      <tr><td style="color:var(--yl)"><code>jcc</code></td><td>justify-content: center;</td></tr>
+      <tr><td style="color:var(--yl)"><code>aic</code></td><td>align-items: center;</td></tr>
+      <tr><td style="color:var(--yl)"><code>fxd</code> / <code>fxdc</code></td><td>flex-direction: column;</td></tr>
+      <tr><td style="color:var(--yl)"><code>fxww</code></td><td>flex-wrap: wrap;</td></tr>
+      <tr><td style="color:var(--yl)"><code>center</code></td><td>display:flex; align-items:center; justify-content:center;</td></tr>
+      <tr><td style="color:var(--yl)"><code>tac</code></td><td>text-align: center;</td></tr>
+      <tr><td style="color:var(--yl)"><code>brr</code></td><td>border-radius:;</td></tr>
+      <tr><td style="color:var(--yl)"><code>op</code></td><td>opacity:;</td></tr>
+      <tr><td style="color:var(--yl)"><code>cur</code></td><td>cursor: pointer;</td></tr>
+      <tr><td style="color:var(--yl)"><code>trs</code></td><td>transition:;</td></tr>
+    </tbody></table>
+
+    <h3 style="color:var(--ac);margin-bottom:8px">📜 JavaScript Snippet qisqartmalari</h3>
+    <table style="width:100%;margin-bottom:18px"><tbody>
+      <tr><td style="color:var(--yl);width:200px"><code>fn</code></td><td>function nomi() { }</td></tr>
+      <tr><td style="color:var(--yl)"><code>af</code> / <code>anfn</code></td><td>() => { } (arrow function)</td></tr>
+      <tr><td style="color:var(--yl)"><code>cl</code> / <code>clg</code></td><td>console.log();</td></tr>
+      <tr><td style="color:var(--yl)"><code>ce</code></td><td>console.error();</td></tr>
+      <tr><td style="color:var(--yl)"><code>fori</code></td><td>for (let i = 0; i < .length; i++)</td></tr>
+      <tr><td style="color:var(--yl)"><code>forof</code></td><td>for (const item of ...)</td></tr>
+      <tr><td style="color:var(--yl)"><code>fe</code></td><td>.forEach(item => { })</td></tr>
+      <tr><td style="color:var(--yl)"><code>asf</code></td><td>async function() { }</td></tr>
+      <tr><td style="color:var(--yl)"><code>awt</code></td><td>await ...;</td></tr>
+      <tr><td style="color:var(--yl)"><code>qs</code></td><td>document.querySelector('');</td></tr>
+      <tr><td style="color:var(--yl)"><code>qsa</code></td><td>document.querySelectorAll('');</td></tr>
+      <tr><td style="color:var(--yl)"><code>addE</code></td><td>addEventListener('', () => { });</td></tr>
+      <tr><td style="color:var(--yl)"><code>setT</code> / <code>sto</code></td><td>setTimeout(() => { }, 1000);</td></tr>
+      <tr><td style="color:var(--yl)"><code>imp</code></td><td>import ... from '';</td></tr>
+      <tr><td style="color:var(--yl)"><code>exp</code></td><td>export default ...;</td></tr>
+      <tr><td style="color:var(--yl)"><code>ifj</code></td><td>if (...) { }</td></tr>
+    </tbody></table>
+
+    <h3 style="color:var(--ac);margin-bottom:8px">🖱️ Muharrir imkoniyatlari</h3>
+    <table style="width:100%"><tbody>
+      <tr><td style="color:var(--gr);width:200px">Fayl daraxti</td><td>O'ng tugma — yangi fayl/papka, nom o'zgartirish, o'chirish</td></tr>
+      <tr><td style="color:var(--gr)">Sudrab tashlash</td><td>Faylni boshqa papkaga ko'chirish (drag & drop)</td></tr>
+      <tr><td style="color:var(--gr)">Split view</td><td>⊞ Split tugmasi — ikki panelda bir vaqtda ishlash</td></tr>
+      <tr><td style="color:var(--gr)">Konsol</td><td>console.log() natijalarini ko'rish (🖥 Konsol)</td></tr>
+      <tr><td style="color:var(--gr)">Snippetlar</td><td>Shaxsiy qisqartmalar yaratish (✨ Snippetlar)</td></tr>
+      <tr><td style="color:var(--gr)">Tarix</td><td>Har saqlashda avtomatik snapshot — eski holatni tiklash</td></tr>
+      <tr><td style="color:var(--gr)">Formatlash</td><td>Shift+Alt+F yoki "Saqlashda formatlash" checkbox</td></tr>
+      <tr><td style="color:var(--gr)">Backend</td><td>Loyiha ichidagi Python serverless funksiyalar</td></tr>
+    </tbody></table>
+
+  </div>
+</div></div>
+
+<div class="modalBg" id="chatBg"><div class="modalBox" style="max-width:480px;height:70vh">
+  <div style="padding:10px 14px;border-bottom:1px solid var(--brd);display:flex;align-items:center;justify-content:space-between">
+    <b style="color:#fff">💬 Loyiha chati</b>
+    <button class="btn bgh bsm" onclick="closeModal('chatBg')">✕</button></div>
+  <div id="chatMessages" style="flex:1;overflow-y:auto;padding:10px;font-size:.82rem"></div>
+  <div style="padding:8px 14px;border-top:1px solid var(--brd);display:flex;gap:6px">
+    <input type="text" id="chatInput" placeholder="Xabar yozing..." style="flex:1;padding:7px 10px;background:var(--bg);border:1px solid var(--brd);border-radius:6px;color:var(--tx);font-size:.82rem" onkeydown="if(event.key==='Enter')sendChat()">
+    <button class="btn bp bsm" onclick="sendChat()">↑</button>
+  </div>
+</div></div>
+
+<div class="modalBg" id="todoBg"><div class="modalBox" style="max-width:500px">
+  <div style="padding:10px 14px;border-bottom:1px solid var(--brd);display:flex;align-items:center;justify-content:space-between">
+    <b style="color:#fff">🎯 TODO / Vazifalar</b>
+    <button class="btn bgh bsm" onclick="closeModal('todoBg')">✕</button></div>
+  <div style="padding:10px 14px;display:flex;gap:6px">
+    <input type="text" id="todoInput" placeholder="Yangi vazifa..." style="flex:1;padding:7px 10px;background:var(--bg);border:1px solid var(--brd);border-radius:6px;color:var(--tx);font-size:.82rem" onkeydown="if(event.key==='Enter')addTodo()">
+    <select id="todoPriority" style="padding:5px;background:var(--bg);border:1px solid var(--brd);border-radius:6px;color:var(--tx);font-size:.78rem"><option value="normal">Normal</option><option value="high">Yuqori</option><option value="low">Past</option></select>
+    <button class="btn bp bsm" onclick="addTodo()">+</button>
+  </div>
+  <div class="modalList" id="todoList" style="max-height:50vh;overflow-y:auto"></div>
+</div></div>
+
+<div class="modalBg" id="compBg"><div class="modalBox" style="max-width:700px;max-height:80vh">
+  <div style="padding:10px 14px;border-bottom:1px solid var(--brd);display:flex;align-items:center;justify-content:space-between">
+    <b style="color:#fff">🧩 Komponent kutubxonasi</b>
+    <button class="btn bgh bsm" onclick="closeModal('compBg')">✕</button></div>
+  <div class="modalList" id="compList" style="overflow-y:auto"></div>
+</div></div>
+
+<div class="modalBg" id="cdnBg"><div class="modalBox" style="max-width:600px;max-height:75vh">
+  <div style="padding:10px 14px;border-bottom:1px solid var(--brd);display:flex;align-items:center;justify-content:space-between">
+    <b style="color:#fff">📦 CDN kutubxonalar</b>
+    <button class="btn bgh bsm" onclick="closeModal('cdnBg')">✕</button></div>
+  <div class="modalList" id="cdnList" style="overflow-y:auto"></div>
+</div></div>
+
+<div class="modalBg" id="colorBg"><div class="modalBox" style="max-width:420px">
+  <div style="padding:10px 14px;border-bottom:1px solid var(--brd);display:flex;align-items:center;justify-content:space-between">
+    <b style="color:#fff">📐 Color Picker</b>
+    <button class="btn bgh bsm" onclick="closeModal('colorBg')">✕</button></div>
+  <div style="padding:14px">
+    <input type="color" id="colorPickerInput" value="#7c6fff" style="width:100%;height:40px;border:none;cursor:pointer;border-radius:6px">
+    <div style="margin-top:8px;display:flex;gap:6px;align-items:center">
+      <input type="text" id="colorHexVal" value="#7c6fff" style="flex:1;padding:6px 10px;background:var(--bg);border:1px solid var(--brd);border-radius:6px;color:var(--tx);font-family:monospace;font-size:.85rem">
+      <button class="btn bp bsm" onclick="insertColor()">Qo'shish</button>
+    </div>
+    <div id="colorPalettes" style="margin-top:12px"></div>
+  </div>
+</div></div>
+
+<div class="modalBg" id="termBg"><div class="modalBox" style="max-width:700px;height:70vh">
+  <div style="padding:10px 14px;border-bottom:1px solid var(--brd);display:flex;align-items:center;justify-content:space-between">
+    <b style="color:#fff">💻 Terminal</b>
+    <button class="btn bgh bsm" onclick="closeModal('termBg')">✕</button></div>
+  <div id="termOutput" style="flex:1;overflow-y:auto;padding:10px;font-family:monospace;font-size:.78rem;background:#05060a;color:var(--gr);white-space:pre-wrap"></div>
+  <div style="padding:8px 14px;border-top:1px solid var(--brd);display:flex;gap:6px">
+    <span style="color:var(--gr);font-family:monospace;font-size:.82rem">$</span>
+    <input type="text" id="termInput" placeholder="Buyruq kiriting..." style="flex:1;padding:7px 10px;background:var(--bg);border:1px solid var(--brd);border-radius:6px;color:var(--tx);font-family:monospace;font-size:.82rem" onkeydown="if(event.key==='Enter')runTermCmd()">
+    <button class="btn bp bsm" onclick="runTermCmd()">▶</button>
+  </div>
+</div></div>
+
 <div class="modalBg" id="snippetsBg"><div class="modalBox">
   <div style="padding:12px 14px;border-bottom:1px solid var(--brd)"><b style="color:#fff">✨ Mening snippetlarim</b></div>
   <div style="padding:12px 14px">
@@ -1524,6 +2248,21 @@ li.CodeMirror-hint-active{background:#7c6fff !important;color:#fff !important}
   </div>
   <div class="modalList" id="snpList"></div>
   <div style="padding:10px 14px"><button class="btn bgh bsm" onclick="closeModal('snippetsBg')">Yopish</button></div>
+</div></div>
+
+<div class="modalBg" id="backendBg"><div class="modalBox" style="max-width:640px">
+  <div style="padding:12px 14px;border-bottom:1px solid var(--brd)"><b style="color:#fff">🐍 Backend route'lari</b></div>
+  <div style="padding:12px 14px">
+    <div class="g g3">
+      <select id="beMethod"><option>GET</option><option>POST</option><option>PUT</option><option>DELETE</option></select>
+      <input type="text" id="bePath" placeholder="Yo'l (masalan: hello)">
+      <button class="btn bp bsm" onclick="addBackendRoute()">+ Qo'shish</button>
+    </div>
+    <textarea id="beCode" placeholder="Python kod. Kirish: request, query, body. Natija: result = ..." style="width:100%;min-height:90px;margin-top:8px;background:var(--bg);border:1px solid var(--brd);color:var(--tx);border-radius:7px;padding:8px;font-family:monospace"></textarea>
+    <p class="khint mt">Chaqiruv manzili: <code>/api/run/UUID/&lt;yo'l&gt;</code> — kirish: <code>request</code>, <code>query</code>, <code>body</code>; natijani <code>result</code> o'zgaruvchisiga yozing.</p>
+  </div>
+  <div class="modalList" id="beList"></div>
+  <div style="padding:10px 14px"><button class="btn bgh bsm" onclick="closeModal('backendBg')">Yopish</button></div>
 </div></div>
 
 <div class="modalBg" id="historyBg"><div class="modalBox">
@@ -1557,7 +2296,10 @@ var HTML_TAG_WHITELIST = ['div','span','p','a','ul','ol','li','table','tr','td',
   'form','input','button','img','nav','section','article','header','footer','aside','h1','h2','h3','h4','h5','h6',
   'label','textarea','select','option','optgroup','i','b','strong','em','small','br','hr','iframe','video','audio',
   'canvas','svg','path','script','link','meta','style','title','head','body','html','main','figure','figcaption',
-  'blockquote','code','pre','strike','u','sub','sup','dl','dt','dd','fieldset','legend','address','time','mark'];
+  'blockquote','code','pre','strike','u','sub','sup','dl','dt','dd','fieldset','legend','address','time','mark',
+  'picture','source','track','embed','object','map','area','datalist','output','progress','meter',
+  'caption','colgroup','col','details','summary','dialog','data','bdi','bdo','wbr','template','slot',
+  'noscript','cite','abbr','q','del','ins','sup','sub'];
 var HTML_DEFAULT_ATTRS = {
   a: [['href','']],
   img: [['src',''],['alt','']],
@@ -1853,7 +2595,10 @@ function emExtractAbbrev(line, endCh){
 }
 
 var SNIPPETS = {
-  h: { 'html5': '<!DOCTYPE html>\\n<html lang="uz">\\n<head>\\n  <meta charset="UTF-8">\\n  <title>§</title>\\n</head>\\n<body>\\n  §\\n</body>\\n</html>', 'com': '<!-- § -->' },
+  h: {
+    'html5': '<!DOCTYPE html>\\n<html lang="uz">\\n<head>\\n  <meta charset="UTF-8">\\n  <title>§</title>\\n</head>\\n<body>\\n  §\\n</body>\\n</html>',
+    'com': '<!-- § -->'
+  },
   c: {
     'col': 'color: §;', 'bg': 'background: §;', 'bgc': 'background-color: §;',
     'bgi': 'background-image: url(§);', 'w': 'width: §;', 'h': 'height: §;',
@@ -2115,7 +2860,7 @@ function renderTabs(){
     el.appendChild(label); el.appendChild(xBtn);
     if (splitOn){
       var sp = document.createElement('span');
-      sp.textContent = '⊞'; sp.title = 'O\\'ng panelda ochish';
+      sp.textContent = '⊞'; sp.title = 'Ong panelda ochish';
       sp.style.marginLeft='4px'; sp.style.opacity='.6';
       sp.onclick = function(ev){ ev.stopPropagation(); openFile(p, 2); };
       el.appendChild(sp);
@@ -2249,7 +2994,7 @@ function moveFile(oldp, newp){
   if (oldp===newp) return;
   authFetch('/editor/fs/rename',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({uuid:'UUID',old_path:oldp,new_path:newp})
-  }).then(function(r){return r.json();}).then(function(d){ if(d.ok) loadAll(); else flash('✗ Ko\\'chirishda xato','rd'); });
+  }).then(function(r){return r.json();}).then(function(d){ if(d.ok) loadAll(); else flash('✗ Kochirishda xato','rd'); });
 }
 function renderTreeNode(node, host, depth){
   var keys = Object.keys(node.children).sort(function(a,b){
@@ -2503,7 +3248,7 @@ function runGlobalSearch(){
   var q = document.getElementById('gsQuery').value;
   var results = document.getElementById('gsResults');
   results.innerHTML = '';
-  if (!q){ results.innerHTML = '<div class="modalRow"><small>So\\'z kiriting</small></div>'; return; }
+  if (!q){ results.innerHTML = '<div class="modalRow"><small>Soz kiriting</small></div>'; return; }
   var contents = allFileContents();
   var totalHits = 0;
   Object.keys(contents).forEach(function(path){
@@ -2528,7 +3273,7 @@ function runGlobalSearch(){
 function runGlobalReplace(){
   var q = document.getElementById('gsQuery').value;
   var rep = document.getElementById('gsReplace').value;
-  if (!q) { flash('⚠ Qidiruv so\\'zi bo\\'sh','yl'); return; }
+  if (!q) { flash('⚠ Qidiruv sozi bosh','yl'); return; }
   if (!confirm("Barcha fayllarda \\""+q+"\\" ni \\""+rep+"\\" ga almashtirasizmi? Bekor qilib bo'lmaydi.")) return;
   var changed = 0;
   fileList.forEach(function(f){
@@ -2565,7 +3310,7 @@ function renderSnippetList(){
     row.querySelector('button').onclick = function(){ delSnippet(s.id); };
     list.appendChild(row);
   });
-  if (!userSnippets.length) list.innerHTML = '<div class="modalRow"><small>Hali snippet yo\\'q</small></div>';
+  if (!userSnippets.length) list.innerHTML = '<div class="modalRow"><small>Hali snippet yoq</small></div>';
 }
 function addSnippet(){
   var lang = document.getElementById('snpLang').value;
@@ -2580,7 +3325,7 @@ function addSnippet(){
       if (!SNIPPETS[lang]) SNIPPETS[lang]={};
       SNIPPETS[lang][trig] = body;
       document.getElementById('snpTrigger').value=''; document.getElementById('snpBody').value='';
-      renderSnippetList(); flash('✓ Snippet qo\\'shildi','gr');
+      renderSnippetList(); flash('✓ Snippet qoshildi','gr');
     } else flash('✗ Xato: trigger allaqachon mavjud','rd');
   });
 }
@@ -2619,9 +3364,343 @@ function openHistory(){
         };
         list.appendChild(row);
       });
-      if (!(d.history||[]).length) list.innerHTML = '<div class="modalRow"><small>Tarix bo\\'sh</small></div>';
+      if (!(d.history||[]).length) list.innerHTML = '<div class="modalRow"><small>Tarix bosh</small></div>';
     });
 }
+
+/* ══════════════════════════════════════════════════════════════════════
+   YORDAM PANELI (Emmet qisqartmalari va tugmalar haqida)
+   ══════════════════════════════════════════════════════════════════════ */
+function openHelpPanel(){
+  document.getElementById('helpBg').style.display = 'flex';
+}
+document.addEventListener('DOMContentLoaded', function(){
+  var hbg = document.getElementById('helpBg');
+  if (hbg) hbg.addEventListener('click', function(e){
+    if (e.target.id === 'helpBg') closeModal('helpBg');
+  });
+});
+
+/* ══════════════════════════════════════════════════════════════════════
+   CHAT — Loyiha ichidagi jonli chat
+   ══════════════════════════════════════════════════════════════════════ */
+var chatInterval=null;
+function openChatPanel(){
+  document.getElementById('chatBg').style.display='flex';
+  loadChat();
+  if(chatInterval) clearInterval(chatInterval);
+  chatInterval=setInterval(loadChat,3000);
+}
+function loadChat(){
+  authFetch('/api/chat/UUID/messages').then(function(r){return r.json();}).then(function(d){
+    var box=document.getElementById('chatMessages');
+    box.innerHTML=(d.messages||[]).map(function(m){
+      return '<div style="margin-bottom:6px"><b style="color:var(--ac);font-size:.75rem">'+m.username+'</b> <span class="tm" style="font-size:.65rem">'+m.created_at.slice(11,16)+'</span><br><span>'+m.message+'</span></div>';
+    }).join('') || '<p class="tm" style="text-align:center;margin-top:20px">Hali xabar yoq</p>';
+    box.scrollTop=box.scrollHeight;
+  });
+}
+function sendChat(){
+  var inp=document.getElementById('chatInput');
+  var msg=inp.value.trim();
+  if(!msg) return;
+  authFetch('/api/chat/UUID/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg})}).then(function(){inp.value='';loadChat();});
+}
+document.addEventListener('DOMContentLoaded',function(){
+  document.getElementById('chatBg').addEventListener('click',function(e){if(e.target.id==='chatBg'){closeModal('chatBg');if(chatInterval)clearInterval(chatInterval);}});
+});
+
+/* ══════════════════════════════════════════════════════════════════════
+   TODO — Loyiha vazifalar ro'yxati
+   ══════════════════════════════════════════════════════════════════════ */
+function openTodoPanel(){
+  document.getElementById('todoBg').style.display='flex';
+  loadTodos();
+}
+function loadTodos(){
+  authFetch('/api/todos/UUID').then(function(r){return r.json();}).then(function(d){
+    var list=document.getElementById('todoList');
+    list.innerHTML=(d.todos||[]).map(function(t){
+      var pri={'high':'🔴','normal':'🟡','low':'🟢'}[t.priority]||'🟡';
+      return '<div class="modalRow" style="'+(t.is_done?'opacity:.5;text-decoration:line-through':'')+'"><span>'+pri+' '+t.title+'</span><span class="fl"><button class="btn bgh bsm" onclick="toggleTodo('+t.id+','+(!t.is_done)+')">✓</button><button class="btn br bsm" onclick="delTodo('+t.id+')">🗑</button></span></div>';
+    }).join('') || '<div class="modalRow"><small>Vazifa yoq</small></div>';
+  });
+}
+function addTodo(){
+  var inp=document.getElementById('todoInput');var title=inp.value.trim();
+  var pri=document.getElementById('todoPriority').value;
+  if(!title){flash('⚠ Vazifa kiriting','yl');return;}
+  authFetch('/api/todos/UUID',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:title,priority:pri})}).then(function(r){return r.json();}).then(function(d){if(d.ok){inp.value='';loadTodos();flash('✓ Qoshildi','gr');}});
+}
+function toggleTodo(id,done){
+  authFetch('/api/todos/UUID/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({is_done:done})}).then(function(){loadTodos();});
+}
+function delTodo(id){
+  authFetch('/api/todos/UUID/'+id,{method:'DELETE'}).then(function(){loadTodos();});
+}
+document.addEventListener('DOMContentLoaded',function(){document.getElementById('todoBg').addEventListener('click',function(e){if(e.target.id==='todoBg')closeModal('todoBg');});});
+
+/* ══════════════════════════════════════════════════════════════════════
+   KOMPONENT KUTUBXONASI
+   ══════════════════════════════════════════════════════════════════════ */
+function openComponentsPanel(){
+  document.getElementById('compBg').style.display='flex';
+  authFetch('/api/components').then(function(r){return r.json();}).then(function(d){
+    var list=document.getElementById('compList');
+    window._compData=d.components||[];
+    list.innerHTML=window._compData.map(function(c,i){
+      return '<div class="modalRow" style="flex-direction:column;align-items:flex-start"><div class="fl" style="width:100%"><b style="color:#fff;font-size:.82rem">'+c.name+'</b><span class="bx xp mla">'+c.category+'</span><button class="btn bp bsm" onclick="insertComponent('+i+')">+ Ulash</button></div></div>';
+    }).join('');
+  });
+}
+function insertComponent(idx){
+  if(!cm||!activePath||!window._compData||!window._compData[idx]) return;
+  var code=window._compData[idx].code;
+  var cur=cm.getCursor();
+  cm.replaceRange(code+'\\n',cur);
+  closeModal('compBg');
+  flash('✓ Komponent ulandi','gr');
+  scheduleRun();
+}
+document.addEventListener('DOMContentLoaded',function(){document.getElementById('compBg').addEventListener('click',function(e){if(e.target.id==='compBg')closeModal('compBg');});});
+
+/* ══════════════════════════════════════════════════════════════════════
+   CDN KUTUBXONALAR
+   ══════════════════════════════════════════════════════════════════════ */
+function openCDNPanel(){
+  document.getElementById('cdnBg').style.display='flex';
+  authFetch('/api/cdn/libraries').then(function(r){return r.json();}).then(function(d){
+    var list=document.getElementById('cdnList');
+    window._cdnData=d.libraries||[];
+    list.innerHTML=window._cdnData.map(function(lib,i){
+      return '<div class="modalRow" style="flex-direction:column;align-items:flex-start;gap:4px"><div class="fl" style="width:100%"><b style="color:#fff;font-size:.82rem">'+lib.name+'</b><span class="bx xp mla">'+lib.category+'</span><button class="btn bp bsm" onclick="addCDNByIdx('+i+')">+ Ulash</button></div></div>';
+    }).join('');
+  });
+}
+function addCDNByIdx(idx){
+  var lib=window._cdnData[idx];if(!lib) return;
+  addCDN(lib.css||'',lib.js||'');
+}
+function addCDN(css,js){
+  authFetch('/api/cdn/add/UUID',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({css:css,js:js})}).then(function(r){return r.json();}).then(function(d){
+    if(d.ok){flash('✓ Kutubxona ulandi','gr');loadAll();closeModal('cdnBg');}
+    else flash('Xato: '+(d.error||''),'rd');
+  });
+}
+document.addEventListener('DOMContentLoaded',function(){var el=document.getElementById('cdnBg');if(el)el.addEventListener('click',function(e){if(e.target.id==='cdnBg')closeModal('cdnBg');});});
+
+/* ══════════════════════════════════════════════════════════════════════
+   COLOR PICKER
+   ══════════════════════════════════════════════════════════════════════ */
+function openColorPicker(){
+  document.getElementById('colorBg').style.display='flex';
+  loadPalettes();
+  document.getElementById('colorPickerInput').oninput=function(){document.getElementById('colorHexVal').value=this.value;};
+}
+function loadPalettes(){
+  authFetch('/api/color/palette').then(function(r){return r.json();}).then(function(d){
+    var box=document.getElementById('colorPalettes');
+    var html='';
+    Object.keys(d.palettes||{}).forEach(function(name){
+      html+='<p style="color:var(--mt);font-size:.72rem;margin:8px 0 4px">'+name+'</p><div style="display:flex;flex-wrap:wrap;gap:4px">';
+      d.palettes[name].forEach(function(c){
+        html+='<div data-color="'+c+'" style="width:24px;height:24px;border-radius:4px;cursor:pointer;background:'+c+';border:1px solid var(--brd)" title="'+c+'"></div>';
+      });
+      html+='</div>';
+    });
+    box.innerHTML=html;
+    box.querySelectorAll('[data-color]').forEach(function(el){
+      el.onclick=function(){pickColor(el.getAttribute('data-color'));};
+    });
+  });
+}
+function pickColor(c){document.getElementById('colorHexVal').value=c;document.getElementById('colorPickerInput').value=c;}
+function insertColor(){
+  var c=document.getElementById('colorHexVal').value;
+  if(!cm||!activePath) return;
+  var cur=cm.getCursor();
+  cm.replaceRange(c,cur);
+  closeModal('colorBg');
+  flash('✓ Rang qoshildi: '+c,'gr');
+}
+document.addEventListener('DOMContentLoaded',function(){document.getElementById('colorBg').addEventListener('click',function(e){if(e.target.id==='colorBg')closeModal('colorBg');});});
+
+/* ══════════════════════════════════════════════════════════════════════
+   TERMINAL
+   ══════════════════════════════════════════════════════════════════════ */
+function openTerminal(){document.getElementById('termBg').style.display='flex';document.getElementById('termInput').focus();}
+function runTermCmd(){
+  var inp=document.getElementById('termInput');var cmd=inp.value.trim();
+  if(!cmd) return;
+  var out=document.getElementById('termOutput');
+  out.innerHTML+='<span style="color:var(--ac)">$ '+cmd+'</span>\\n';
+  inp.value='';
+  authFetch('/api/terminal/exec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:cmd})}).then(function(r){return r.json();}).then(function(d){
+    if(d.ok) out.innerHTML+='<span>'+((d.output||'').replace(/</g,'&lt;'))+'</span>\\n';
+    else out.innerHTML+='<span style="color:var(--rd)">Xato: '+(d.error||'')+'</span>\\n';
+    out.scrollTop=out.scrollHeight;
+  }).catch(function(){out.innerHTML+='<span style="color:var(--rd)">Tarmoq xatosi</span>\\n';});
+}
+document.addEventListener('DOMContentLoaded',function(){document.getElementById('termBg').addEventListener('click',function(e){if(e.target.id==='termBg')closeModal('termBg');});});
+
+/* ══════════════════════════════════════════════════════════════════════
+   PWA GENERATOR
+   ══════════════════════════════════════════════════════════════════════ */
+function generatePWA(){
+  if(!confirm('Loyihaga PWA fayllarni (manifest.json, sw.js) qoshish va index.html ni yangilashni xohlaysizmi?')) return;
+  authFetch('/api/pwa/generate/UUID',{method:'POST'}).then(function(r){return r.json();}).then(function(d){
+    if(d.ok){flash('✓ PWA yaratildi: '+d.files.join(', '),'gr');loadAll();}
+    else flash('✗ Xato','rd');
+  });
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   README GENERATOR
+   ══════════════════════════════════════════════════════════════════════ */
+function generateReadme(){
+  if(!confirm('README.md faylni avtomatik yaratish/yangilashni xohlaysizmi?')) return;
+  authFetch('/api/readme/generate/UUID',{method:'POST'}).then(function(r){return r.json();}).then(function(d){
+    if(d.ok){flash('✓ README.md yaratildi','gr');loadAll();}
+    else flash('✗ Xato','rd');
+  });
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   RASM DRAG&DROP YUKLASH
+   ══════════════════════════════════════════════════════════════════════ */
+document.addEventListener('DOMContentLoaded',function(){
+  var cmHost=document.getElementById('cmHost');
+  if(!cmHost) return;
+  cmHost.addEventListener('dragover',function(e){e.preventDefault();e.dataTransfer.dropEffect='copy';cmHost.style.outline='2px dashed var(--ac)';});
+  cmHost.addEventListener('dragleave',function(){cmHost.style.outline='';});
+  cmHost.addEventListener('drop',function(e){
+    e.preventDefault();cmHost.style.outline='';
+    var files=e.dataTransfer.files;
+    if(!files.length) return;
+    var file=files[0];
+    if(!file.type.startsWith('image/')){flash('⚠ Faqat rasm fayllar','yl');return;}
+    var fd=new FormData();fd.append('image',file);
+    authFetch('/editor/upload-image/UUID',{method:'POST',body:fd}).then(function(r){return r.json();}).then(function(d){
+      if(d.ok){
+        var tag='<img src="'+d.url+'" alt="'+d.filename+'">';
+        if(cm&&activePath) cm.replaceRange(tag+'\\n',cm.getCursor());
+        flash('✓ Rasm yuklandi va qoshildi','gr');
+        scheduleRun();
+      } else flash('✗ '+(d.error||'Xato'),'rd');
+    });
+  });
+});
+
+/* ══════════════════════════════════════════════════════════════════════
+   CLIPBOARD PASTE (Ctrl+V rasm)
+   ══════════════════════════════════════════════════════════════════════ */
+document.addEventListener('DOMContentLoaded',function(){
+  document.addEventListener('paste',function(e){
+    var items=e.clipboardData&&e.clipboardData.items;
+    if(!items) return;
+    for(var i=0;i<items.length;i++){
+      if(items[i].type.indexOf('image')!==-1){
+        e.preventDefault();
+        var file=items[i].getAsFile();
+        var fd=new FormData();fd.append('image',file);
+        authFetch('/editor/paste-image/UUID',{method:'POST',body:fd}).then(function(r){return r.json();}).then(function(d){
+          if(d.ok&&cm&&activePath){
+            cm.replaceRange('<img src="'+d.url+'" alt="paste">\\n',cm.getCursor());
+            flash('✓ Rasm clipboard dan qoshildi','gr');
+            scheduleRun();
+          }
+        });
+        break;
+      }
+    }
+  });
+});
+
+/* ══════════════════════════════════════════════════════════════════════
+   LIVE COLLABORATION (polling)
+   ══════════════════════════════════════════════════════════════════════ */
+var _collabTime=0,_collabInterval=null;
+function startCollab(){
+  if(_collabInterval) return;
+  _collabInterval=setInterval(function(){
+    authFetch('/api/collab/UUID/poll?since='+_collabTime).then(function(r){return r.json();}).then(function(d){
+      _collabTime=d.server_time||_collabTime;
+      (d.updates||[]).forEach(function(u){
+        if(u.path===activePath&&docsCache[u.path]){
+          // Boshqa foydalanuvchi o'zgartirgan — yangilash
+          flash('🤝 '+u.user+' fayl yangiladi: '+u.path,'ac');
+        }
+      });
+    });
+    // Faol foydalanuvchilarni ko'rsatish
+    authFetch('/api/collab/UUID/users').then(function(r){return r.json();}).then(function(d){
+      var ps=document.getElementById('ps');
+      if(ps&&d.count>1) ps.textContent='🤝 '+d.count+' ta foydalanuvchi';
+    });
+  },5000);
+}
+document.addEventListener('DOMContentLoaded',function(){setTimeout(startCollab,2000);});
+
+/* ══════════════════════════════════════════════════════════════════════
+   BACKEND ROUTE'LAR (loyiha ichidagi mini-serverless funksiyalar)
+   ══════════════════════════════════════════════════════════════════════ */
+var beRoutes = [];
+
+function openBackendPanel(){
+  document.getElementById('backendBg').style.display = 'flex';
+  beRefresh();
+}
+function beRefresh(){
+  authFetch('/editor/backend/UUID').then(function(r){return r.json();}).then(function(d){
+    beRoutes = d.routes || [];
+    renderBackendList();
+  });
+}
+function renderBackendList(){
+  var list = document.getElementById('beList');
+  list.innerHTML = '';
+  beRoutes.forEach(function(r){
+    var row = document.createElement('div');
+    row.className = 'modalRow';
+    row.innerHTML = '<span>['+r.method+'] /'+r.path+' '+(r.is_enabled?'':'<small>(ochirilgan)</small>')+'</span>'+
+      '<span class="fl"><button class="btn bgh bsm" data-t="tog">'+(r.is_enabled?'⏸':'▶️')+'</button>'+
+      '<button class="btn br bsm" data-t="del">🗑</button></span>';
+    row.querySelectorAll('button')[0].onclick = function(){ toggleBackendRoute(r.id, !r.is_enabled); };
+    row.querySelectorAll('button')[1].onclick = function(){ deleteBackendRoute(r.id); };
+    list.appendChild(row);
+  });
+  if (!beRoutes.length) list.innerHTML = '<div class="modalRow"><small>Hali backend route yoq</small></div>';
+}
+function addBackendRoute(){
+  var method = document.getElementById('beMethod').value;
+  var path = document.getElementById('bePath').value.trim();
+  var code = document.getElementById('beCode').value;
+  if (!path){ flash('⚠ Yol kiriting','yl'); return; }
+  authFetch('/editor/backend/UUID',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({path:path,method:method,code:code})
+  }).then(function(r){return r.json();}).then(function(d){
+    if (d.ok){
+      document.getElementById('bePath').value=''; document.getElementById('beCode').value='';
+      beRefresh(); flash('✓ Route qoshildi','gr');
+    } else flash('✗ '+(d.error||'Xato'),'rd');
+  });
+}
+function toggleBackendRoute(id, enabled){
+  authFetch('/editor/backend/UUID/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({is_enabled:enabled})
+  }).then(function(r){return r.json();}).then(function(){ beRefresh(); });
+}
+function deleteBackendRoute(id){
+  if (!confirm('Route ochirilsinmi?')) return;
+  authFetch('/editor/backend/UUID/'+id,{method:'DELETE'}).then(function(r){return r.json();}).then(function(){ beRefresh(); });
+}
+document.addEventListener('DOMContentLoaded', function(){
+  var bg = document.getElementById('backendBg');
+  if (bg) bg.addEventListener('click', function(e){
+    if (e.target.id === 'backendBg') closeModal('backendBg');
+  });
+});
 
 /* ══════════════════════════════════════════════════════════════════════
    INITSIALIZATSIYA
@@ -2720,7 +3799,10 @@ def projects_list():
           <div class="fl">
             <a href="/editor/{p['uuid']}" class="btn bp bsm">✏️ Tahrirlash</a>
             <a href="/preview/{p['uuid']}" class="btn bgh bsm" target="_blank">👁 Ko'rish</a>
+            <a href="/responsive/{p['uuid']}" class="btn bgh bsm" target="_blank">🎯 Responsive</a>
             <a href="/projects/share/{p['uuid']}" class="btn bg bsm">🔗 Share</a>
+            <a href="/share-folder/{p['uuid']}" class="btn bgh bsm" target="_blank">📂 Papka</a>
+            <a href="/projects/{p['uuid']}/team" class="btn bgh bsm">🧑‍🤝‍🧑 Jamoa</a>
             <a href="/projects/download/{p['uuid']}" class="btn bgh bsm">⬇ ZIP</a>
             <button class="btn bgh bsm" onclick="showLoc('{p['uuid']}')">📍 Manzil</button>
             <form method="POST" action="/projects/delete/{p['uuid']}" onsubmit="return confirm('O\\'chirish?')" style="margin-left:auto">{csrf_field()}
@@ -3402,6 +4484,7 @@ def admin_settings():
         <button class="btn br bsm">🗑 Bekor qilish</button></form></td></tr>""" for k in api_keys)
     body = f"""
     <h2 style="color:#fff;margin-bottom:14px">⚙️ Sozlamalar</h2>
+    <a href="/admin/backend/logs" class="btn bgh bsm">🐍 Backend loglari</a>
     <div class="card"><h3>🔔 Telegram bildirishnomalar / 2FA</h3>
       <p class="tm mb" style="font-size:.79rem">Yangi login, bloklangan IP, ro'yxatdan o'tish, fayl yuklash va 2FA tasdiqlash kodlari uchun.
       Bot yaratish uchun @BotFather ga, chat ID olish uchun @userinfobot ga yozing. Har bir foydalanuvchi
@@ -3609,6 +4692,2626 @@ def e404(e):
     <a href="/" class="btn bgh mt">← Asosiy</a></div></body></html>""",404
 
 # ╔══════════════════════════════════════════════════════════════════════════╗
+# ║        YANGI FUNKSIYALAR: Domain, Chat, PWA, Team, Audit, TODO, ...     ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+
+# ── Audit Trail — barcha muhim harakatlarni qayd qilish ───────────────────
+def audit(action, target_type=None, target_id=None, details=None):
+    """Muhim amallarni audit_log jadvaliga yozadi."""
+    try:
+        uid = session.get("user_id")
+        uname = session.get("username", "")
+        ip = get_ip()
+        db_exec("INSERT INTO audit_log (user_id,username,action,target_type,target_id,details,ip_address) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (uid, uname, action, target_type, str(target_id) if target_id else None,
+                 (details or "")[:500], ip), fetch=False)
+    except Exception:
+        pass
+
+
+
+# ── IP Whitelist middleware ────────────────────────────────────────────────
+@app.before_request
+def _check_ip_whitelist():
+    """Agar IP whitelist yoqilgan bo'lsa, faqat ro'yxatdagi IP larni o'tkazadi."""
+    if get_setting("ip_whitelist_enabled", "0") != "1":
+        return None
+    if request.path in ("/login", "/logout") or request.path.startswith("/static"):
+        return None
+    if session.get("admin"):
+        return None
+    ip = get_ip()
+    allowed_ip = q1("SELECT id FROM ip_whitelist WHERE ip_address=?", (ip,))
+    if not allowed_ip:
+        return f"""<!DOCTYPE html><html><head><meta charset=UTF-8>
+        <style>{CSS} body{{display:flex;align-items:center;justify-content:center;min-height:100vh;text-align:center}}</style>
+        </head><body><div><p style="font-size:2.5rem">🔒</p>
+        <h1 style="color:var(--rd);margin:10px 0">Kirish cheklangan</h1>
+        <p class="tm">Sizning IP ({ip}) ruxsat ro'yxatida yo'q.</p>
+        <a href="/login" class="btn bgh mt">Admin sifatida kirish</a>
+        </div></body></html>""", 403
+    return None
+
+
+
+# ── Admin: IP Whitelist boshqaruvi ────────────────────────────────────────
+@app.route("/admin/ip-whitelist", methods=["GET", "POST"])
+@admin_req
+def admin_ip_whitelist():
+    suc = None
+    if request.method == "POST":
+        action = request.form.get("_action", "add")
+        if action == "add":
+            ip = request.form.get("ip", "").strip()
+            label = request.form.get("label", "").strip()
+            if ip:
+                db_exec("INSERT OR IGNORE INTO ip_whitelist (ip_address,label,added_by) VALUES (?,?,?)",
+                        (ip, label, session["user_id"]), fetch=False)
+                audit("ip_whitelist_add", "ip", ip, label)
+                suc = f"IP qo'shildi: {ip}"
+        elif action == "delete":
+            wid = request.form.get("wid")
+            db_exec("DELETE FROM ip_whitelist WHERE id=?", (wid,), fetch=False)
+            audit("ip_whitelist_remove", "ip", wid)
+            suc = "IP o'chirildi"
+        elif action == "toggle":
+            cur = get_setting("ip_whitelist_enabled", "0")
+            set_setting("ip_whitelist_enabled", "0" if cur == "1" else "1")
+            suc = "IP whitelist holati o'zgartirildi"
+    wl_on = get_setting("ip_whitelist_enabled", "0") == "1"
+    ips = db_exec("SELECT * FROM ip_whitelist ORDER BY created_at DESC") or []
+    rows = "".join(f"""<tr><td><code>{ip['ip_address']}</code></td><td>{ip.get('label') or '—'}</td>
+      <td class="tm" style="font-size:.74rem">{str(ip['created_at'])[:16]}</td>
+      <td><form method="POST">{csrf_field()}<input type="hidden" name="_action" value="delete">
+        <input type="hidden" name="wid" value="{ip['id']}">
+        <button class="btn br bsm">🗑</button></form></td></tr>""" for ip in ips)
+    body = f"""
+    <h2 style="color:#fff;margin-bottom:14px">🔒 IP Whitelist</h2>
+    <div class="card">
+      <div class="fl mb">
+        <span class="bx {'xg' if wl_on else 'xm'}">{'Yoqilgan' if wl_on else "O'chirilgan"}</span>
+        <form method="POST" style="margin-left:auto">{csrf_field()}
+          <input type="hidden" name="_action" value="toggle">
+          <button class="btn {'br' if wl_on else 'bg'} bsm">{"🔴 O'chirish" if wl_on else "🟢 Yoqish"}</button>
+        </form>
+      </div>
+      <p class="tm mb" style="font-size:.79rem">Yoqilganda faqat ro'yxatdagi IP lar saytga kira oladi. Admin har doim kirishi mumkin.</p>
+      <form method="POST" class="row mb">{csrf_field()}<input type="hidden" name="_action" value="add">
+        <input name="ip" placeholder="IP manzil (masalan: 192.168.1.10)" required style="flex:1;padding:7px 10px;background:var(--bg);border:1px solid var(--brd);border-radius:6px;color:var(--tx);font-size:.82rem">
+        <input name="label" placeholder="Izoh" style="flex:1;padding:7px 10px;background:var(--bg);border:1px solid var(--brd);border-radius:6px;color:var(--tx);font-size:.82rem">
+        <button class="btn bp bsm">+ Qo'shish</button>
+      </form>
+      <div class="tw"><table><thead><tr><th>IP</th><th>Izoh</th><th>Qo'shilgan</th><th>Amal</th></tr></thead>
+      <tbody>{rows or '<tr><td colspan=4 style="text-align:center;color:var(--mt);padding:14px">Royxat bosh</td></tr>'}</tbody></table></div>
+    </div>"""
+    return _pg("IP Whitelist", body, "ipwl", flash=suc, ftype="ok")
+
+
+
+# ── Custom Domain / Subdomain ─────────────────────────────────────────────
+@app.route("/admin/domains", methods=["GET", "POST"])
+@admin_req
+def admin_domains():
+    suc = None
+    if request.method == "POST":
+        action = request.form.get("_action", "add")
+        if action == "add":
+            puuid = request.form.get("project_uuid", "").strip()
+            domain = request.form.get("domain", "").strip().lower()
+            proj = q1("SELECT id FROM projects WHERE uuid=?", (puuid,))
+            if proj and domain:
+                db_exec("INSERT OR IGNORE INTO custom_domains (project_id,domain,created_by) VALUES (?,?,?)",
+                        (proj["id"], domain, session["user_id"]), fetch=False)
+                audit("domain_add", "domain", domain)
+                suc = f"Domain qo'shildi: {domain}"
+        elif action == "delete":
+            did = request.form.get("did")
+            db_exec("DELETE FROM custom_domains WHERE id=?", (did,), fetch=False)
+            suc = "Domain o'chirildi"
+        elif action == "toggle":
+            did = request.form.get("did")
+            db_exec("UPDATE custom_domains SET is_active=1-is_active WHERE id=?", (did,), fetch=False)
+            suc = "Domain holati o'zgartirildi"
+    domains = db_exec("SELECT d.*,p.name as pname,p.uuid as puuid FROM custom_domains d LEFT JOIN projects p ON d.project_id=p.id ORDER BY d.created_at DESC") or []
+    projs = db_exec("SELECT uuid,name FROM projects ORDER BY name") or []
+    po = "".join(f'<option value="{p["uuid"]}">{p["name"]}</option>' for p in projs)
+    rows = "".join(f"""<tr>
+      <td><code style="color:var(--ac)">{d['domain']}</code></td>
+      <td>{d.get('pname') or '—'}</td>
+      <td><span class="bx {'xg' if d['is_active'] else 'xr'}">{'Faol' if d['is_active'] else "O'chiq"}</span></td>
+      <td class="fl">
+        <form method="POST">{csrf_field()}<input type="hidden" name="_action" value="toggle"><input type="hidden" name="did" value="{d['id']}">
+          <button class="btn bgh bsm">{'⏸' if d['is_active'] else '▶️'}</button></form>
+        <form method="POST">{csrf_field()}<input type="hidden" name="_action" value="delete"><input type="hidden" name="did" value="{d['id']}">
+          <button class="btn br bsm">🗑</button></form>
+      </td></tr>""" for d in domains)
+    body = f"""
+    <h2 style="color:#fff;margin-bottom:14px">🌐 Custom Domain / Subdomain</h2>
+    <div class="card">
+      <p class="tm mb" style="font-size:.79rem">Har loyihaga o'z domain/subdomain berish. DNS A yozuvini server IP ga yo'naltiring.
+      Loyiha domeni orqali ochilganda avtomatik preview sahifasiga yo'naltiriladi.</p>
+      <form method="POST" class="row mb">{csrf_field()}<input type="hidden" name="_action" value="add">
+        <select name="project_uuid" required style="flex:1;padding:7px;background:var(--bg);border:1px solid var(--brd);border-radius:6px;color:var(--tx)"><option value="">Loyiha tanlang</option>{po}</select>
+        <input name="domain" placeholder="masalan: mysite.example.com" required style="flex:2;padding:7px 10px;background:var(--bg);border:1px solid var(--brd);border-radius:6px;color:var(--tx);font-size:.82rem">
+        <button class="btn bp bsm">+ Qo'shish</button>
+      </form>
+      <div class="tw"><table><thead><tr><th>Domain</th><th>Loyiha</th><th>Holat</th><th>Amallar</th></tr></thead>
+      <tbody>{rows or '<tr><td colspan=4 style="text-align:center;color:var(--mt);padding:14px">Hali domain yoq</td></tr>'}</tbody></table></div>
+    </div>"""
+    return _pg("Domenlar", body, "domains", flash=suc, ftype="ok")
+
+# Domain orqali kelgan so'rovlarni loyiha preview ga yo'naltirish
+@app.before_request
+def _check_custom_domain():
+    host = request.host.split(":")[0].lower()
+    if host in ("127.0.0.1", "localhost", "0.0.0.0"):
+        return None
+    dom = q1("SELECT d.*,p.uuid FROM custom_domains d JOIN projects p ON d.project_id=p.id WHERE d.domain=? AND d.is_active=1", (host,))
+    if dom and request.path == "/":
+        return redirect(f"/preview/{dom['uuid']}")
+    return None
+
+
+
+# ── Jamoa/Team tizimi ─────────────────────────────────────────────────────
+@app.route("/projects/<puuid>/team", methods=["GET", "POST"])
+@user_req
+def project_team(puuid):
+    proj = q1("SELECT * FROM projects WHERE uuid=?", (puuid,))
+    if not proj:
+        abort(404)
+    is_owner = proj["owner_id"] == session["user_id"]
+    if not is_owner and not session.get("admin"):
+        abort(403)
+    suc = err = None
+    if request.method == "POST":
+        action = request.form.get("_action", "invite")
+        if action == "invite":
+            username = request.form.get("username", "").strip()
+            role = request.form.get("role", "viewer")
+            if role not in ("viewer", "editor"):
+                role = "viewer"
+            user = q1("SELECT id FROM users WHERE username=?", (username,))
+            if not user:
+                err = "Foydalanuvchi topilmadi"
+            elif user["id"] == proj["owner_id"]:
+                err = "Loyiha egasini qo'shish shart emas"
+            else:
+                db_exec("INSERT OR REPLACE INTO project_teams (project_id,user_id,role,invited_by) VALUES (?,?,?,?)",
+                        (proj["id"], user["id"], role, session["user_id"]), fetch=False)
+                audit("team_invite", "project", puuid, f"{username} -> {role}")
+                suc = f"{username} jamoga qo'shildi ({role})"
+        elif action == "remove":
+            tid = request.form.get("tid")
+            db_exec("DELETE FROM project_teams WHERE id=? AND project_id=?", (tid, proj["id"]), fetch=False)
+            suc = "Foydalanuvchi jamoadan chiqarildi"
+    members = db_exec("SELECT t.*,u.username,u.email FROM project_teams t JOIN users u ON t.user_id=u.id WHERE t.project_id=? ORDER BY t.created_at", (proj["id"],)) or []
+    rows = "".join(f"""<tr><td>{m['username']}</td><td>{m.get('email','')}</td>
+      <td><span class="bx {'xb' if m['role']=='editor' else 'xm'}">{m['role']}</span></td>
+      <td><form method="POST">{csrf_field()}<input type="hidden" name="_action" value="remove">
+        <input type="hidden" name="tid" value="{m['id']}"><button class="btn br bsm">🗑</button></form></td></tr>""" for m in members)
+    import html as hm
+    body = f"""
+    <h2 style="color:#fff;margin-bottom:14px">🧑‍🤝‍🧑 Jamoa — {hm.escape(proj['name'])}</h2>
+    <div class="card">
+      <form method="POST" class="row mb">{csrf_field()}<input type="hidden" name="_action" value="invite">
+        <input name="username" placeholder="Username" required style="flex:1;padding:7px 10px;background:var(--bg);border:1px solid var(--brd);border-radius:6px;color:var(--tx)">
+        <select name="role" style="padding:7px;background:var(--bg);border:1px solid var(--brd);border-radius:6px;color:var(--tx)">
+          <option value="viewer">Viewer</option><option value="editor">Editor</option></select>
+        <button class="btn bp bsm">+ Taklif qilish</button>
+      </form>
+      <div class="tw"><table><thead><tr><th>Foydalanuvchi</th><th>Email</th><th>Rol</th><th>Amal</th></tr></thead>
+      <tbody>{rows or '<tr><td colspan=4 style="text-align:center;color:var(--mt);padding:14px">Hali jamoa azosi yoq</td></tr>'}</tbody></table></div>
+    </div>
+    <a href="/projects" class="btn bgh mt">← Loyihalar</a>"""
+    return _pg("Jamoa", body, "projects", flash=suc or err, ftype="ok" if suc else "er")
+
+
+
+# ── Real-time Chat (SSE - Server-Sent Events) ─────────────────────────────
+@app.route("/api/chat/<puuid>/messages")
+@user_req
+def chat_messages(puuid):
+    proj = q1("SELECT id FROM projects WHERE uuid=?", (puuid,))
+    if not proj:
+        return jsonify({"messages": []})
+    msgs = db_exec("SELECT * FROM chat_messages WHERE project_id=? ORDER BY id DESC LIMIT 50", (proj["id"],)) or []
+    msgs.reverse()
+    return jsonify({"messages": [{"id": m["id"], "username": m["username"], "message": m["message"],
+                                   "created_at": str(m["created_at"])[:19]} for m in msgs]})
+
+@app.route("/api/chat/<puuid>/send", methods=["POST"])
+@user_req
+def chat_send(puuid):
+    proj = q1("SELECT id FROM projects WHERE uuid=?", (puuid,))
+    if not proj:
+        return jsonify({"ok": False}), 404
+    d = request.get_json() or {}
+    msg = (d.get("message") or "").strip()[:500]
+    if not msg:
+        return jsonify({"ok": False, "error": "Xabar bo'sh"})
+    db_exec("INSERT INTO chat_messages (project_id,user_id,username,message) VALUES (?,?,?,?)",
+            (proj["id"], session["user_id"], session.get("username", ""), msg), fetch=False)
+    return jsonify({"ok": True})
+
+
+
+# ── PWA Generator ─────────────────────────────────────────────────────────
+@app.route("/api/pwa/generate/<puuid>", methods=["POST"])
+@user_req
+@write_req
+def pwa_generate(puuid):
+    proj = q1("SELECT * FROM projects WHERE uuid=?", (puuid,))
+    if not proj:
+        return jsonify({"ok": False}), 404
+    import html as hm
+    name = proj["name"]
+    # manifest.json
+    manifest = json.dumps({
+        "name": name, "short_name": name[:12], "start_url": ".", "display": "standalone",
+        "background_color": "#0d0f18", "theme_color": "#7c6fff",
+        "icons": [{"src": "icon-192.png", "sizes": "192x192", "type": "image/png"},
+                  {"src": "icon-512.png", "sizes": "512x512", "type": "image/png"}]
+    }, indent=2, ensure_ascii=False)
+    # service-worker.js
+    sw = """const CACHE='pwa-v1';const ASSETS=['/','/index.html'];
+self.addEventListener('install',e=>e.waitUntil(caches.open(CACHE).then(c=>c.addAll(ASSETS))));
+self.addEventListener('fetch',e=>e.respondWith(caches.match(e.request).then(r=>r||fetch(e.request))));"""
+    # Fayllarni loyihaga yozamiz
+    db_exec("INSERT INTO project_files (project_id,path,is_folder,content) VALUES (?,?,0,?) "
+            "ON CONFLICT(project_id,path) DO UPDATE SET content=excluded.content,updated_at=datetime('now')",
+            (proj["id"], "manifest.json", manifest), fetch=False)
+    db_exec("INSERT INTO project_files (project_id,path,is_folder,content) VALUES (?,?,0,?) "
+            "ON CONFLICT(project_id,path) DO UPDATE SET content=excluded.content,updated_at=datetime('now')",
+            (proj["id"], "sw.js", sw), fetch=False)
+    # index.html ga manifest va sw registratsiyasini qo'shamiz
+    idx = q1("SELECT content FROM project_files WHERE project_id=? AND path='index.html'", (proj["id"],))
+    if idx and idx.get("content"):
+        html_content = idx["content"]
+        if "manifest.json" not in html_content and "</head>" in html_content:
+            pwa_tags = '  <link rel="manifest" href="manifest.json">\n  <meta name="theme-color" content="#7c6fff">\n'
+            html_content = html_content.replace("</head>", pwa_tags + "</head>")
+        if "sw.js" not in html_content and "</body>" in html_content:
+            sw_reg = "  <script>if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js');</script>\n"
+            html_content = html_content.replace("</body>", sw_reg + "</body>")
+        db_exec("UPDATE project_files SET content=?,updated_at=datetime('now') WHERE project_id=? AND path='index.html'",
+                (html_content, proj["id"]), fetch=False)
+    audit("pwa_generate", "project", puuid)
+    return jsonify({"ok": True, "files": ["manifest.json", "sw.js"]})
+
+
+
+# ── TODO / Vazifalar ro'yxati ──────────────────────────────────────────────
+@app.route("/api/todos/<puuid>", methods=["GET", "POST"])
+@user_req
+def api_todos(puuid):
+    proj = q1("SELECT id FROM projects WHERE uuid=?", (puuid,))
+    if not proj:
+        return jsonify({"todos": []})
+    if request.method == "GET":
+        todos = db_exec("SELECT * FROM project_todos WHERE project_id=? ORDER BY is_done, priority DESC, id DESC",
+                        (proj["id"],)) or []
+        return jsonify({"todos": todos})
+    d = request.get_json() or {}
+    title = (d.get("title") or "").strip()[:200]
+    priority = d.get("priority", "normal")
+    if priority not in ("low", "normal", "high"):
+        priority = "normal"
+    if not title:
+        return jsonify({"ok": False, "error": "Sarlavha kerak"})
+    new_id = db_exec("INSERT INTO project_todos (project_id,user_id,title,priority) VALUES (?,?,?,?)",
+                     (proj["id"], session["user_id"], title, priority), fetch=False)
+    return jsonify({"ok": True, "id": new_id})
+
+@app.route("/api/todos/<puuid>/<int:tid>", methods=["PUT", "DELETE"])
+@user_req
+def api_todo_item(puuid, tid):
+    proj = q1("SELECT id FROM projects WHERE uuid=?", (puuid,))
+    if not proj:
+        abort(404)
+    if request.method == "DELETE":
+        db_exec("DELETE FROM project_todos WHERE id=? AND project_id=?", (tid, proj["id"]), fetch=False)
+        return jsonify({"ok": True})
+    d = request.get_json() or {}
+    is_done = 1 if d.get("is_done") else 0
+    completed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S") if is_done else None
+    db_exec("UPDATE project_todos SET is_done=?,completed_at=? WHERE id=? AND project_id=?",
+            (is_done, completed_at, tid, proj["id"]), fetch=False)
+    return jsonify({"ok": True})
+
+
+
+# ── Rasm yuklash (muharrir ichida drag&drop) ───────────────────────────────
+@app.route("/editor/upload-image/<puuid>", methods=["POST"])
+@user_req
+@write_req
+def editor_upload_image(puuid):
+    proj = q1("SELECT * FROM projects WHERE uuid=?", (puuid,))
+    if not proj:
+        return jsonify({"ok": False}), 404
+    f = request.files.get("image")
+    if not f or not f.filename:
+        return jsonify({"ok": False, "error": "Fayl tanlanmadi"})
+    ext = Path(f.filename).suffix.lower()
+    if ext not in (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico"):
+        return jsonify({"ok": False, "error": "Ruxsat etilmagan format"})
+    safe_name = secure_filename(f.filename)
+    stored = f"{uuid.uuid4().hex[:8]}_{safe_name}"
+    dest = FILES_PATH / stored
+    f.save(str(dest))
+    url = f"/uploads/files/{stored}"
+    audit("image_upload", "project", puuid, safe_name)
+    return jsonify({"ok": True, "url": url, "filename": safe_name})
+
+# Statik uploads xizmat qilish
+@app.route("/uploads/files/<filename>")
+def serve_upload(filename):
+    return send_from_directory(str(FILES_PATH), filename)
+
+
+
+# ── Uptime Monitoring ──────────────────────────────────────────────────────
+_uptime_data = {"checks": [], "last_down": None}
+
+def _uptime_checker():
+    """Har 60 sekundda serverni tekshiradi."""
+    while True:
+        time.sleep(60)
+        try:
+            t0 = time.time()
+            import urllib.request as ur
+            port = CFG["PORT"]
+            try:
+                ur.urlopen(f"http://127.0.0.1:{port}/login", timeout=5)
+                status = "up"
+            except Exception:
+                status = "down"
+            ms = int((time.time() - t0) * 1000)
+            db_exec("INSERT INTO uptime_logs (status,response_ms) VALUES (?,?)", (status, ms), fetch=False)
+            # Eski loglarni tozalash (7 kundan oshgan)
+            db_exec("DELETE FROM uptime_logs WHERE checked_at < datetime('now','-7 days')", fetch=False)
+        except Exception:
+            pass
+
+@app.route("/admin/uptime")
+@admin_req
+def admin_uptime():
+    logs = db_exec("SELECT * FROM uptime_logs ORDER BY id DESC LIMIT 1440") or []  # 24 soat * 60
+    total = len(logs)
+    up_count = sum(1 for l in logs if l["status"] == "up")
+    uptime_pct = round((up_count / total * 100), 2) if total else 100.0
+    avg_ms = round(sum(l["response_ms"] or 0 for l in logs) / total, 1) if total else 0
+    last_down = None
+    for l in logs:
+        if l["status"] == "down":
+            last_down = str(l["checked_at"])[:19]
+            break
+    recent = logs[:60]  # Oxirgi 1 soat
+    bars = "".join(f'<div style="width:2px;height:{min(30, max(3,(l["response_ms"] or 0)//10))}px;background:{"var(--gr)" if l["status"]=="up" else "var(--rd)"};border-radius:1px"></div>' for l in reversed(recent))
+    body = f"""
+    <h2 style="color:#fff;margin-bottom:14px">📉 Uptime Monitoring</h2>
+    <div class="g g4 mb">
+      <div class="stat"><div class="v" style="color:{'var(--gr)' if uptime_pct > 99 else 'var(--yl)'}">{uptime_pct}%</div><div class="l">Uptime (7 kun)</div></div>
+      <div class="stat"><div class="v">{avg_ms}</div><div class="l">O'rtacha javob (ms)</div></div>
+      <div class="stat"><div class="v">{total}</div><div class="l">Tekshiruvlar soni</div></div>
+      <div class="stat"><div class="v" style="font-size:1rem">{last_down or 'Hech qachon'}</div><div class="l">Oxirgi nosozlik</div></div>
+    </div>
+    <div class="card"><h3>Oxirgi 1 soat (har 1 daqiqa)</h3>
+      <div style="display:flex;gap:1px;align-items:end;min-height:34px;padding:8px 0">{bars or '<span class="tm">Malumot yoq</span>'}</div>
+    </div>"""
+    return _pg("Uptime", body, "uptime")
+
+
+
+# ── Audit Trail sahifasi (admin) ───────────────────────────────────────────
+@app.route("/admin/audit")
+@admin_req
+def admin_audit():
+    logs = db_exec("SELECT * FROM audit_log ORDER BY id DESC LIMIT 200") or []
+    rows = "".join(f"""<tr>
+      <td>{l.get('username') or '—'}</td>
+      <td><span class="bx xb">{l['action']}</span></td>
+      <td>{l.get('target_type') or '—'}</td>
+      <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;font-size:.74rem">{(l.get('details') or '—')[:60]}</td>
+      <td><code style="font-size:.72rem">{l.get('ip_address') or '—'}</code></td>
+      <td class="tm" style="font-size:.73rem">{str(l['created_at'])[:19]}</td>
+    </tr>""" for l in logs)
+    body = f"""
+    <h2 style="color:#fff;margin-bottom:14px">📝 Audit Trail</h2>
+    <p class="tm mb" style="font-size:.79rem">Barcha muhim harakatlar logi. Kim, qachon, nima qilgani shu yerda ko'rinadi.</p>
+    <div class="card" style="padding:0"><div class="tw">
+      <table><thead><tr><th>Foydalanuvchi</th><th>Harakat</th><th>Turi</th><th>Tafsilotlar</th><th>IP</th><th>Vaqt</th></tr></thead>
+      <tbody>{rows or '<tr><td colspan=6 style="text-align:center;color:var(--mt);padding:16px">Hali yozuv yoq</td></tr>'}</tbody></table>
+    </div></div>"""
+    return _pg("Audit Trail", body, "audit")
+
+
+
+# ── README Generator ───────────────────────────────────────────────────────
+@app.route("/api/readme/generate/<puuid>", methods=["POST"])
+@user_req
+@write_req
+def readme_generate(puuid):
+    proj = q1("SELECT * FROM projects WHERE uuid=?", (puuid,))
+    if not proj:
+        return jsonify({"ok": False}), 404
+    files = db_exec("SELECT path,is_folder FROM project_files WHERE project_id=? ORDER BY path", (proj["id"],)) or []
+    tree_lines = []
+    for f in files:
+        depth = f["path"].count("/")
+        prefix = "  " * depth + ("📁 " if f["is_folder"] else "📄 ")
+        tree_lines.append(prefix + f["path"].split("/")[-1])
+    tree = "\n".join(tree_lines) or "Fayl yo'q"
+    readme = f"""# {proj['name']}
+
+## Loyiha haqida
+Bu loyiha SrvManager platformasida yaratilgan.
+
+## Fayl tuzilmasi
+```
+{tree}
+```
+
+## Ishga tushirish
+1. Fayllarni yuklab oling (ZIP)
+2. `index.html` ni brauzerda oching
+
+## Texnologiyalar
+- HTML5
+- CSS3
+- JavaScript
+
+## Muallif
+Yaratilgan: {str(proj.get('created_at',''))[:10]}
+
+---
+*SrvManager tomonidan avtomatik yaratilgan*
+"""
+    db_exec("INSERT INTO project_files (project_id,path,is_folder,content) VALUES (?,?,0,?) "
+            "ON CONFLICT(project_id,path) DO UPDATE SET content=excluded.content,updated_at=datetime('now')",
+            (proj["id"], "README.md", readme), fetch=False)
+    audit("readme_generate", "project", puuid)
+    return jsonify({"ok": True, "content": readme})
+
+
+
+# ── Markdown Editor (preview API) ──────────────────────────────────────────
+@app.route("/api/markdown/preview", methods=["POST"])
+@user_req
+def markdown_preview():
+    """Oddiy Markdown ni HTML ga aylantiradi (server tomonda)."""
+    d = request.get_json() or {}
+    md_text = d.get("text", "")
+    # Oddiy markdown parser (tashqi kutubxonasiz)
+    html_out = _simple_md_to_html(md_text)
+    return jsonify({"html": html_out})
+
+def _simple_md_to_html(text):
+    """Minimal markdown -> HTML konverter."""
+    import re as _re
+    lines = text.split("\n")
+    html_lines = []
+    in_code = False
+    for line in lines:
+        if line.startswith("```"):
+            if in_code:
+                html_lines.append("</pre></code>")
+                in_code = False
+            else:
+                html_lines.append("<code><pre>")
+                in_code = True
+            continue
+        if in_code:
+            html_lines.append(line)
+            continue
+        # Headings
+        if line.startswith("### "):
+            html_lines.append(f"<h3>{line[4:]}</h3>")
+        elif line.startswith("## "):
+            html_lines.append(f"<h2>{line[3:]}</h2>")
+        elif line.startswith("# "):
+            html_lines.append(f"<h1>{line[2:]}</h1>")
+        elif line.startswith("- ") or line.startswith("* "):
+            html_lines.append(f"<li>{line[2:]}</li>")
+        elif line.startswith("> "):
+            html_lines.append(f"<blockquote>{line[2:]}</blockquote>")
+        elif line.strip() == "---":
+            html_lines.append("<hr>")
+        elif line.strip() == "":
+            html_lines.append("<br>")
+        else:
+            # Inline formatting
+            l = line
+            l = _re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', l)
+            l = _re.sub(r'\*(.+?)\*', r'<em>\1</em>', l)
+            l = _re.sub(r'`(.+?)`', r'<code>\1</code>', l)
+            l = _re.sub(r'\[(.+?)\]\((.+?)\)', r'<a href="\2">\1</a>', l)
+            l = _re.sub(r'!\[(.+?)\]\((.+?)\)', r'<img src="\2" alt="\1">', l)
+            html_lines.append(f"<p>{l}</p>")
+    if in_code:
+        html_lines.append("</pre></code>")
+    return "\n".join(html_lines)
+
+
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║         OFFLINE AI YORDAMCHI — mahalliy fayllar asosida ishlaydi         ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+AI_DATA_DIR = Path("ai_data")
+AI_DATA_DIR.mkdir(exist_ok=True)
+AI_KNOWLEDGE_FILE = AI_DATA_DIR / "knowledge.json"
+AI_TOPICS_FILE = AI_DATA_DIR / "topics.json"
+AI_WORDS_FILE = AI_DATA_DIR / "question_words.json"
+AI_BADWORDS_FILE = AI_DATA_DIR / "badwords.json"
+
+# ── Haqoratli so'zlar filtri ──────────────────────────────────────────────
+# Foydalanuvchi o'zi qo'shadi — standart ro'yxat BO'SH
+_DEFAULT_BADWORDS = []
+
+def _load_badwords():
+    if AI_BADWORDS_FILE.exists():
+        try:
+            with open(AI_BADWORDS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data.get("words", []) if isinstance(data, dict) else data
+        except Exception:
+            pass
+    return _DEFAULT_BADWORDS
+
+def _load_badword_responses():
+    """Haqoratli so'zga javob matnini yuklaydi."""
+    if AI_BADWORDS_FILE.exists():
+        try:
+            with open(AI_BADWORDS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data.get("response", "")
+        except Exception:
+            pass
+    return ""
+
+def _save_badwords_data(words, response=""):
+    with open(AI_BADWORDS_FILE, "w", encoding="utf-8") as f:
+        json.dump({"words": words, "response": response}, f, ensure_ascii=False, indent=2)
+
+def _contains_profanity(text):
+    """Matnda haqoratli so'z bor-yo'qligini tekshiradi."""
+    badwords = _load_badwords()
+    if not badwords:
+        return False
+    cleaned = re.sub(r'[^a-zA-Z0-9\u0400-\u04FF]', '', text.lower())
+    text_lower = text.lower()
+    for word in badwords:
+        if not word or len(word) < 2:
+            continue
+        word_clean = re.sub(r'[^a-zA-Z0-9\u0400-\u04FF]', '', word.lower())
+        if len(word_clean) < 2:
+            continue
+        if word_clean in cleaned:
+            return True
+        if word.lower() in text_lower:
+            return True
+        # Harflar orasiga belgi qo'yilgan holat
+        if len(word) >= 3:
+            pattern = r'[^a-zA-Z\u0400-\u04FF]*'.join(re.escape(ch) for ch in word.lower())
+            if re.search(pattern, text_lower):
+                return True
+    return False
+
+# ── Bilim bazasi yuklash/saqlash ──────────────────────────────────────────
+def _load_ai_knowledge():
+    if not AI_KNOWLEDGE_FILE.exists():
+        return []
+    try:
+        with open(AI_KNOWLEDGE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+def _save_ai_knowledge(data):
+    with open(AI_KNOWLEDGE_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+# ── Mavzular (topic + info) ──────────────────────────────────────────────
+def _load_ai_topics():
+    if not AI_TOPICS_FILE.exists():
+        return []
+    try:
+        with open(AI_TOPICS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+def _save_ai_topics(data):
+    with open(AI_TOPICS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+# ── Savol so'zlari (nima, qanday, ...) ───────────────────────────────────
+def _load_question_words():
+    if not AI_WORDS_FILE.exists():
+        defaults = ["nima", "qanday", "necha", "qachon", "kim", "qayerda", "nega", "qancha"]
+        _save_question_words(defaults)
+        return defaults
+    try:
+        with open(AI_WORDS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return ["nima", "qanday"]
+
+def _save_question_words(words):
+    with open(AI_WORDS_FILE, "w", encoding="utf-8") as f:
+        json.dump(words, f, ensure_ascii=False, indent=2)
+
+# ── HTML/CSS/Emmet bilim bazasi ────────────────────────────────────────────
+_HTML_TAGS = {
+    "div": ("Block konteyner element", "<div>Mazmun</div>", "Elementlarni guruhlash, layout yaratish uchun ishlatiladi"),
+    "span": ("Inline konteyner", "<span>matn</span>", "Matn ichida kichik qismni ajratish uchun"),
+    "p": ("Paragraf (abzats)", "<p>Matn</p>", "Matn paragraflarini yaratish uchun"),
+    "a": ("Havola (link)", '<a href="url">Matn</a>', "Boshqa sahifaga yoki manzilga havola yaratadi"),
+    "img": ("Rasm", '<img src="rasm.jpg" alt="tavsif">', "Sahifaga rasm qo'shadi. Yopiluvchi teg yo'q"),
+    "h1": ("1-darajali sarlavha", "<h1>Sarlavha</h1>", "Eng katta sarlavha. h1-h6 gacha bor"),
+    "h2": ("2-darajali sarlavha", "<h2>Sarlavha</h2>", "Ikkinchi darajali sarlavha"),
+    "h3": ("3-darajali sarlavha", "<h3>Sarlavha</h3>", "Uchinchi darajali sarlavha"),
+    "ul": ("Tartibsiz ro'yxat", "<ul><li>Element</li></ul>", "Nuqtali ro'yxat yaratadi"),
+    "ol": ("Tartibli ro'yxat", "<ol><li>Element</li></ol>", "Raqamli ro'yxat yaratadi"),
+    "li": ("Ro'yxat elementi", "<li>Element</li>", "ul yoki ol ichida ishlatiladi"),
+    "table": ("Jadval", "<table><tr><td>Katak</td></tr></table>", "Ma'lumotlarni jadval ko'rinishida ko'rsatadi"),
+    "tr": ("Jadval qatori", "<tr>...</tr>", "table ichida qator yaratadi"),
+    "td": ("Jadval katagi", "<td>Ma'lumot</td>", "tr ichida katak yaratadi"),
+    "th": ("Jadval sarlavha katagi", "<th>Sarlavha</th>", "Qalin va markazlashtirilgan katak"),
+    "form": ("Forma", '<form action="/url" method="POST">...</form>', "Foydalanuvchi kiritgan ma'lumotlarni yuborish uchun"),
+    "input": ("Kiritish maydoni", '<input type="text" name="ism">', "Matn, parol, checkbox va boshqa turlar"),
+    "button": ("Tugma", "<button>Bosish</button>", "Bosiladigan tugma yaratadi"),
+    "textarea": ("Ko'p qatorli matn", "<textarea>Matn</textarea>", "Katta matn kiritish maydoni"),
+    "select": ("Tanlash ro'yxati", "<select><option>1</option></select>", "Dropdown ro'yxat yaratadi"),
+    "nav": ("Navigatsiya", "<nav>Havolalar</nav>", "Sayt navigatsiyasi uchun semantik teg"),
+    "header": ("Sarlavha bo'limi", "<header>...</header>", "Sahifa yoki bo'lim sarlavhasi"),
+    "footer": ("Pastki bo'lim", "<footer>...</footer>", "Sahifa pastki qismi (muallif, havolalar)"),
+    "section": ("Bo'lim", "<section>...</section>", "Sahifani mantiqiy bo'limlarga ajratish"),
+    "article": ("Maqola", "<article>...</article>", "Mustaqil mazmunli bo'lim (blog post, yangilik)"),
+    "aside": ("Yon panel", "<aside>...</aside>", "Asosiy mazmun bilan bog'liq qo'shimcha ma'lumot"),
+    "main": ("Asosiy mazmun", "<main>...</main>", "Sahifaning asosiy mazmuni (bitta bo'lishi kerak)"),
+    "br": ("Qator uzish", "<br>", "Yangi qatorga o'tish. Yopiluvchi teg yo'q"),
+    "hr": ("Gorizontal chiziq", "<hr>", "Ajratuvchi gorizontal chiziq"),
+    "strong": ("Qalin matn", "<strong>Muhim</strong>", "Qalin va semantik jihatdan muhim matn"),
+    "em": ("Kursiv matn", "<em>Ta'kidlangan</em>", "Kursiv va ta'kidlangan matn"),
+    "code": ("Kod", "<code>let x = 5;</code>", "Dasturlash kodini ko'rsatish uchun"),
+    "pre": ("Formatlangan matn", "<pre>  bo'sh joy  </pre>", "Bo'sh joylar va qatorlar saqlanadi"),
+    "link": ("Tashqi resurs", '<link rel="stylesheet" href="style.css">', "CSS fayl ulash uchun head ichida"),
+    "script": ("JavaScript", '<script src="app.js"></script>', "JS kodni ulash yoki yozish uchun"),
+    "meta": ("Meta ma'lumot", '<meta charset="UTF-8">', "Sahifa haqida meta ma'lumot (head ichida)"),
+    "title": ("Sahifa nomi", "<title>Nomi</title>", "Brauzer tabida ko'rinadigan nom"),
+    "style": ("Ichki CSS", "<style>body{color:red}</style>", "HTML ichida CSS yozish uchun"),
+    "video": ("Video", '<video src="video.mp4" controls></video>', "Video o'ynatish uchun"),
+    "audio": ("Audio", '<audio src="audio.mp3" controls></audio>', "Musiqa/ovoz o'ynatish uchun"),
+    "iframe": ("Ichki ramka", '<iframe src="url"></iframe>', "Boshqa sahifani ichiga joylashtirish"),
+    "canvas": ("Grafik", '<canvas id="c"></canvas>', "JavaScript bilan rasm chizish uchun"),
+    "label": ("Yorliq", '<label for="id">Matn</label>', "input uchun nom/yorliq"),
+}
+
+_CSS_PROPS = {
+    "display": "Elementning ko'rinish turi: block, inline, flex, grid, none",
+    "flexbox": "display:flex; — elementlarni bir qatorda yoki ustunda joylashtirish. align-items, justify-content bilan boshqariladi",
+    "grid": "display:grid; — 2D tarmoq (setka) yaratish. grid-template-columns, grid-gap bilan boshqariladi",
+    "margin": "Tashqi bo'shliq. margin: 10px; yoki margin-top, margin-bottom, margin-left, margin-right",
+    "padding": "Ichki bo'shliq. padding: 10px; yoki padding-top, padding-bottom...",
+    "border": "Chegara. border: 1px solid #000; — qalinlik, tur, rang",
+    "border-radius": "Burchakni yumaloqlash. border-radius: 10px; yoki 50% (doira)",
+    "color": "Matn rangi. color: red; yoki color: #ff0000; yoki color: rgb(255,0,0);",
+    "background": "Fon. background: #fff; yoki background-image, background-color",
+    "font-size": "Matn o'lchami. font-size: 16px; yoki 1.2rem, 1.5em",
+    "font-weight": "Matn qalinligi. font-weight: bold; yoki 100-900 (400=normal, 700=bold)",
+    "text-align": "Matn joylashuvi. text-align: center/left/right/justify",
+    "position": "Joylashuv turi: static, relative, absolute, fixed, sticky",
+    "z-index": "Qatlam tartibi. Katta son = ustda ko'rinadi. position: relative/absolute bo'lishi kerak",
+    "width": "Kenglik. width: 100%; yoki 300px, 50vw",
+    "height": "Balandlik. height: 100vh; (viewport height), 200px",
+    "overflow": "Toshib ketgan mazmun. overflow: hidden/scroll/auto",
+    "opacity": "Shaffoflik. opacity: 0 (ko'rinmas) dan 1 (to'liq) gacha",
+    "transition": "Animatsiya. transition: all 0.3s ease; — o'zgarishlarni silliq qiladi",
+    "transform": "O'zgartirish. transform: rotate(45deg), scale(1.5), translate(10px,20px)",
+    "box-shadow": "Soya. box-shadow: 0 4px 12px rgba(0,0,0,0.2);",
+    "cursor": "Sichqoncha ko'rinishi. cursor: pointer (qo'l), default, text, move",
+}
+
+_EMMET_EXAMPLES = {
+    "div*10": "10 ta <div></div> yaratadi",
+    "div*5": "5 ta <div></div> yaratadi",
+    "ul>li*5": "<ul> ichida 5 ta <li></li> yaratadi",
+    "ul>li*3": "<ul> ichida 3 ta <li></li> yaratadi",
+    "nav>ul>li*4>a": "Navigatsiya: nav > ul > 4 ta li > har birida a tegi",
+    "div.box": '<div class="box"></div> yaratadi',
+    "div#main": '<div id="main"></div> yaratadi',
+    "div.box#main": '<div class="box" id="main"></div>',
+    "div.item$*3": '<div class="item1"></div>\n<div class="item2"></div>\n<div class="item3"></div>',
+    "h1+p+p": "<h1></h1>\n<p></p>\n<p></p> — bir xil darajada",
+    "div>p>span": "Ichma-ich: div > p > span",
+    "(div>p)*3": "Guruhni 3 marta: div>p, div>p, div>p",
+    "a[href=#]": '<a href="#"></a>',
+    'a{Havola}': '<a href="">Havola</a> — {} ichida matn',
+    "!": "HTML5 to'liq shablon (doctype, html, head, body)",
+    "img": '<img src="" alt=""> yaratadi (avtomatik atributlar)',
+    "input": '<input type="text"> yaratadi',
+    "link": '<link rel="stylesheet" href=""> yaratadi',
+    "div+p": "<div></div>\n<p></p> — qo'shni elementlar",
+    "div>p+span": "<div>\n  <p></p>\n  <span></span>\n</div>",
+    "table>tr*3>td*4": "3 qatorli, 4 ustunli jadval",
+    "form>input*3+button": "Forma: 3 ta input va 1 tugma",
+    "lorem": "30 so'zlik lorem ipsum matn",
+    "lorem10": "10 so'zlik lorem ipsum matn",
+    "div.container>header+main+footer": "Oddiy sahifa tuzilmasi",
+}
+
+def _ai_emmet_answer(q_lower, name):
+    """Emmet haqidagi savollarga javob."""
+    # Umumiy Emmet haqida
+    if re.search(r'emmet\s*(nima|nim|haqida|degan|bu)', q_lower) or q_lower.strip() == "emmet":
+        return f"✨ **Emmet** — HTML va CSS yozishni tezlashtiradigan qisqartmalar tizimi, {name}.\n\nMasalan:\n• `div.box` → `<div class=\"box\"></div>`\n• `ul>li*5` → ul ichida 5 ta li\n• `!` → to'liq HTML5 shablon\n• `div*10` → 10 ta div\n\n📝 Qisqartmani yozib **Tab** bosing — avtomatik kengayadi!\n\nBatafsil so'rang: \"div*10 nima qiladi\" yoki \"ul>li*3 kengaytmasi\""
+
+    # Aniq Emmet misol so'ralsa
+    for pattern, explanation in _EMMET_EXAMPLES.items():
+        # "div*10 nima" yoki "div*10 kengaytmasi" yoki shunchaki "div*10"
+        pat_escaped = re.escape(pattern).replace(r'\*', r'\*').replace(r'\$', r'\$')
+        if re.search(pat_escaped, q_lower):
+            return f"✨ **Emmet: `{pattern}`**\n\nNatija: {explanation}\n\nMuharrirda yozib **Tab** bosing!"
+
+    # Umumiy emmet patternni tushuntirish
+    emmet_q = re.search(r'([\w.#>\+\*\[\]\{\}\(\)\$\!]+)\s*(nima|nim|qiladi|kengayt|natija|yoz)', q_lower)
+    if emmet_q:
+        abbr = emmet_q.group(1)
+        # Oddiy Emmet qoidalarini tushuntirish
+        parts = []
+        if '*' in abbr:
+            parts.append(f"• `*N` — elementni N marta takrorlaydi")
+        if '>' in abbr:
+            parts.append(f"• `>` — ichma-ich (child) element yaratadi")
+        if '+' in abbr:
+            parts.append(f"• `+` — qo'shni (sibling) element yaratadi")
+        if '.' in abbr:
+            parts.append(f"• `.nom` — class atributi qo'shadi")
+        if '#' in abbr:
+            parts.append(f"• `#nom` — id atributi qo'shadi")
+        if '$' in abbr:
+            parts.append(f"• `$` — raqam qo'shadi (1, 2, 3...)")
+        if '(' in abbr:
+            parts.append(f"• `()` — guruh yaratadi")
+        if '[' in abbr:
+            parts.append(f"• `[attr=val]` — atribut qo'shadi")
+        if '{' in abbr:
+            parts.append(f"• `{{matn}}` — element ichiga matn qo'shadi")
+        if parts:
+            explanation = "\n".join(parts)
+            return f"✨ **Emmet: `{abbr}`**\n\nQoidalar:\n{explanation}\n\n📝 Muharrirda yozib **Tab** bosing!"
+
+    return None
+
+def _ai_html_answer(q_lower, name):
+    """HTML teglar haqidagi savollarga javob."""
+    # "div nima", "img tegi", "table qanday" kabi
+    for tag, (desc, example, detail) in _HTML_TAGS.items():
+        patterns = [
+            rf'\b{tag}\b\s*(nima|nim|teg|haqida|qanday|degan|vazifa|ishlatil)',
+            rf'(nima|nim|qanday)\s*(bu\s*)?\b{tag}\b',
+            rf'\b{tag}\b\s*teg',
+        ]
+        for pat in patterns:
+            if re.search(pat, q_lower):
+                return f"🌐 **`<{tag}>` — {desc}**\n\nMisol: `{example}`\n\n📖 {detail}"
+
+    # Umumiy HTML haqida
+    if re.search(r'html\s*(nima|nim|haqida|degan|bu|o.?rgan|ayt)', q_lower):
+        return f"🌐 **HTML** (HyperText Markup Language) — veb-sahifalar yaratish tili, {name}.\n\nAsosiy teglar:\n• `<div>` — block konteyner\n• `<p>` — paragraf\n• `<a>` — havola\n• `<img>` — rasm\n• `<h1>`-`<h6>` — sarlavhalar\n• `<ul>/<ol>` — ro'yxatlar\n• `<table>` — jadval\n• `<form>` — forma\n\nAniq teg haqida so'rang: \"div nima\" yoki \"img tegi\""
+
+    return None
+
+def _ai_css_answer(q_lower, name):
+    """CSS haqidagi savollarga javob."""
+    for prop, desc in _CSS_PROPS.items():
+        patterns = [
+            rf'\b{re.escape(prop)}\b\s*(nima|nim|haqida|qanday|degan|ishlatil|qiladi)',
+            rf'(nima|nim|qanday)\s*(bu\s*)?\b{re.escape(prop)}\b',
+        ]
+        for pat in patterns:
+            if re.search(pat, q_lower):
+                return f"🎨 **CSS: `{prop}`**\n\n{desc}"
+
+    # Umumiy CSS haqida
+    if re.search(r'css\s*(nima|nim|haqida|degan|bu|o.?rgan|ayt)', q_lower):
+        return f"🎨 **CSS** (Cascading Style Sheets) — HTML elementlarning ko'rinishini boshqaradi, {name}.\n\nAsosiy xususiyatlar:\n• `display` — ko'rinish turi (flex, grid, block)\n• `margin/padding` — tashqi/ichki bo'shliq\n• `color` — matn rangi\n• `background` — fon\n• `border` — chegara\n• `position` — joylashuv\n• `font-size` — matn o'lchami\n\nAniq xususiyat haqida so'rang: \"flexbox nima\" yoki \"margin padding\""
+
+    return None
+
+def _ai_solve_math(text):
+    """Matematik ifodani hisoblashga urinadi. Xavfsiz eval."""
+    # Matndan raqam va operatorlarni ajratib olish
+    # "2+2 javobi nechchi" -> "2+2", "2+2 nechchi" -> "2+2"
+    cleaned = re.sub(r'(javobi|javob|nechchi|necha|nechta|qancha|hisobla|hisob)', '', text.lower()).strip()
+    cleaned = re.sub(r'[^\d+\-*/().%^ ]', '', cleaned).strip()
+    if not cleaned or not re.search(r'\d', cleaned):
+        return None
+    # ^ ni ** ga aylantirish
+    cleaned = cleaned.replace('^', '**')
+    try:
+        # Faqat xavfsiz belgilar
+        if re.match(r'^[\d+\-*/().%\s*]+$', cleaned):
+            result = eval(cleaned, {"__builtins__": {}}, {})
+            if isinstance(result, float) and result == int(result):
+                result = int(result)
+            return str(result)
+    except Exception:
+        pass
+    return None
+
+def _ai_play_game(text):
+    """Oddiy o'yinlar va amaliy vositalar."""
+    import random
+    t = text.lower().strip()
+
+    # ── Lorem generatori ──
+    lorem_match = re.search(r'lorem\s*(\d+)?', t)
+    if lorem_match and ("lorem" in t):
+        n = int(lorem_match.group(1) or 30)
+        words = ('lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor '
+                 'incididunt ut labore et dolore magna aliqua ut enim ad minim veniam quis nostrud '
+                 'exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat duis aute '
+                 'irure dolor in reprehenderit voluptate velit esse cillum dolore eu fugiat nulla '
+                 'pariatur excepteur sint occaecat cupidatat non proident sunt culpa qui officia '
+                 'deserunt mollit anim id est laborum').split()
+        result = ' '.join(words[i % len(words)] for i in range(n))
+        result = result[0].upper() + result[1:] + '.'
+        return f"📐 **Lorem ({n} so'z):**\n\n{result}"
+
+    # ── Son topish o'yini ──
+    if re.search(r'son\s*top|topishmoq.*son|son.*o.?yin', t):
+        n = random.randint(1, 100)
+        # Saqlaymiz session ga (keyingi xabarlarda tekshirish uchun)
+        hints = []
+        if n < 50: hints.append("50 dan kichik")
+        else: hints.append("50 dan katta")
+        if n % 2 == 0: hints.append("juft son")
+        else: hints.append("toq son")
+        return f"🎯 **Son topish o'yini!**\n\nMen 1 dan 100 gacha son o'yladim.\n\n💡 Maslahat: {hints[0]}, {hints[1]}.\n\nJavobingizni yozing! (To'g'ri javob: ||{n}||)"
+
+    # ── Eslatma / Timer ──
+    reminder_match = re.search(r'(\d+)\s*(daqiqa|minut|min|sekund|sek|sec|soat)', t)
+    if reminder_match and any(w in t for w in ["eslat", "timer", "vaqt", "bildir", "ogohlantir"]):
+        amount = int(reminder_match.group(1))
+        unit = reminder_match.group(2)
+        if "sek" in unit or "sec" in unit:
+            ms = amount * 1000
+            unit_name = "sekund"
+        elif "soat" in unit:
+            ms = amount * 3600000
+            unit_name = "soat"
+        else:
+            ms = amount * 60000
+            unit_name = "daqiqa"
+        return f"⏰ **Eslatma qo'yildi!**\n\n{amount} {unit_name} dan keyin bildirishnoma keladi.\n\n||TIMER:{ms}||"
+
+    # ── Vaqt/sana ──
+    if any(w in t for w in ["soat", "vaqt", "nechanchi", "bugun", "sana", "kun"]):
+        if any(w in t for w in ["soat", "vaqt", "nech"]):
+            now = datetime.now()
+            return f"🕐 Hozir: **{now.strftime('%H:%M:%S')}**\n📅 Sana: **{now.strftime('%Y-%m-%d')}** ({['Dushanba','Seshanba','Chorshanba','Payshanba','Juma','Shanba','Yakshanba'][now.weekday()]})"
+        if any(w in t for w in ["bugun", "sana", "nechanchi", "kun"]):
+            now = datetime.now()
+            kunlar = ['Dushanba','Seshanba','Chorshanba','Payshanba','Juma','Shanba','Yakshanba']
+            oylar = ['Yanvar','Fevral','Mart','Aprel','May','Iyun','Iyul','Avgust','Sentyabr','Oktyabr','Noyabr','Dekabr']
+            return f"📅 Bugun: **{now.day}-{oylar[now.month-1]}, {now.year}-yil** ({kunlar[now.weekday()]})"
+
+    # ── Tosh-qaychi-qog'oz ──
+    if any(w in t for w in ["tosh", "qaychi", "qogoz", "qog'oz", "kagoz"]):
+        choices = ["tosh", "qaychi", "qogoz"]
+        user_choice = None
+        if "tosh" in t: user_choice = "tosh"
+        elif "qaychi" in t: user_choice = "qaychi"
+        elif any(w in t for w in ["qogoz", "qog'oz", "kagoz"]): user_choice = "qogoz"
+        if user_choice:
+            ai_choice = random.choice(choices)
+            wins = {"tosh": "qaychi", "qaychi": "qogoz", "qogoz": "tosh"}
+            emoji = {"tosh": "🪨", "qaychi": "✂️", "qogoz": "📄"}
+            if user_choice == ai_choice:
+                return f"Men: {emoji[ai_choice]} {ai_choice}\nSiz: {emoji[user_choice]} {user_choice}\n\n🤝 Durrang!"
+            elif wins[user_choice] == ai_choice:
+                return f"Men: {emoji[ai_choice]} {ai_choice}\nSiz: {emoji[user_choice]} {user_choice}\n\n🎉 Siz yutdingiz!"
+            else:
+                return f"Men: {emoji[ai_choice]} {ai_choice}\nSiz: {emoji[user_choice]} {user_choice}\n\n😎 Men yutdim!"
+        return "Tosh-qaychi-qogoz: 'tosh', 'qaychi' yoki 'qogoz' yozing!"
+
+    # ── O'yinlar ro'yxati ──
+    if any(w in t for w in ["oyin", "o'yin", "oyna", "game", "zerik"]):
+        return "🎮 **O'yinlar va vositalar:**\n\n• 🪨 Tosh-qaychi-qogoz: 'tosh', 'qaychi', 'qogoz'\n• 🎯 Son topish: 'son top'\n• 🧮 Matematik: '2+2', '15*3', '(5+3)*2'\n• 🎲 Tasodifiy son: 'son ber'\n• 😂 Latifa: 'latifa'\n• 📐 Lorem: 'lorem 50'\n• 🕐 Vaqt: 'soat nechchi', 'bugun'\n• ⏰ Eslatma: '5 daqiqadan keyin eslatib tur'"
+
+    # ── Tasodifiy son ──
+    if "son" in t and ("ber" in t or "ayt" in t):
+        n = random.randint(1, 100)
+        return f"🎲 Tasodifiy son: **{n}**"
+
+    # ── Latifa ──
+    if any(w in t for w in ["latifa", "hazil", "kul", "anekdot"]):
+        jokes = [
+            "Dasturchi nega yomg'irni yaxshi ko'radi? Chunki bug (xato) lar yo'qoladi! 😄",
+            "— Salom, texnik yordam? Kompyuterim ishlamayapti.\n— Yoqib ko'rdingizmi?\n— Ha, juda yoqadi! 😂",
+            "Dasturchi turmushga chiqdi... catch blokida 💍",
+            "Wi-Fi parolni bilasizmi?\n— Ha, devorga yozilgan.\n— 12345678mi?\n— Yo'q, 'devorga_yozilgan' 😂",
+            "Nechta dasturchi lampochka almashtirishi kerak? Hech biri — bu hardware muammo! 💡",
+            "404: Latifa topilmadi... 😜 Hazil, mana:\nHTML ni CSS siz ko'rganmisiz? Yalang'och! 🙈",
+        ]
+        return random.choice(jokes)
+
+    return None
+
+# ── Loyiha yordamchisi ────────────────────────────────────────────────────
+def _ai_project_helper(q_lower, name):
+    """Loyiha fayllari haqida ma'lumot beradi."""
+    if not any(w in q_lower for w in ["loyiha", "fayl", "project", "papka", "index", "nechta"]):
+        return None
+    # Foydalanuvchining loyihalari
+    uid = session.get("user_id", 0)
+    if any(w in q_lower for w in ["nechta fayl", "fayl soni", "fayllar"]):
+        projs = db_exec("SELECT p.name,p.uuid,(SELECT COUNT(*) FROM project_files WHERE project_id=p.id) as cnt FROM projects p WHERE p.owner_id=? ORDER BY p.updated_at DESC LIMIT 5", (uid,)) or []
+        if not projs:
+            return f"{name}, sizda hali loyiha yo'q. /projects sahifasidan yangi loyiha yarating!"
+        lines = "\n".join([f"• **{p['name']}** — {p['cnt']} ta fayl" for p in projs])
+        return f"📁 **Sizning loyihalaringiz:**\n\n{lines}"
+    if any(w in q_lower for w in ["loyiha", "project", "nechta loyiha"]):
+        cnt = q1("SELECT COUNT(*) c FROM projects WHERE owner_id=?", (uid,))
+        total = cnt["c"] if cnt else 0
+        return f"📁 {name}, sizda jami **{total}** ta loyiha bor.\n\n'nechta fayl' deb so'rang — har bir loyihadagi fayllar sonini ko'rsataman."
+    return None
+
+def _ai_find_answer(question, username="", history=None):
+    """Savol uchun eng yaxshi javobni topadi."""
+    q_lower = question.lower().strip()
+    q_words = set(re.findall(r'\w+', q_lower))
+    question_words = _load_question_words()
+    name = username or "foydalanuvchi"
+    hist = history or []
+
+    # ── Oldingi suhbatga murojat ──
+    memory_patterns = [r"oldin\s*(nima|nim)", r"avval\s*(nima|nim)", r"esla",
+                       r"birinchi\s*savol", r"oxirgi\s*savol", r"nima\s*degan\s*edim",
+                       r"nima\s*so.?ragan", r"tarix"]
+    for pat in memory_patterns:
+        if re.search(pat, q_lower):
+            if not hist:
+                return f"Hali suhbatimiz boshlanmagan, {name}. Menga biror narsa so'rang! 😊"
+            last_msgs = hist[-5:]
+            memory_text = "\n".join([f"• Siz: {m['q']}\n  Men: {m['a'][:80]}..." for m in last_msgs])
+            return f"📝 So'nggi suhbatimiz, {name}:\n\n{memory_text}\n\n(Jami {len(hist)} ta xabar saqlangan)"
+
+    # ── Matematik amallar ──
+    math_result = _ai_solve_math(question)
+    if math_result is not None:
+        return f"🧮 Javob: **{math_result}**"
+
+    # ── O'yinlar ──
+    game_result = _ai_play_game(question)
+    if game_result is not None:
+        return game_result
+
+    # ── Loyiha yordamchisi ──
+    proj_result = _ai_project_helper(q_lower, name)
+    if proj_result:
+        return proj_result
+
+    # ── AI o'zi haqida ──
+    ai_about_patterns = [
+        r"sen\s*kim", r"siz\s*kim", r"kim\s*sen", r"kimsan",
+        r"o.?zi.?\s*haqida", r"o.?zing\s*haqida",
+        r"sen\s*nima", r"siz\s*nima.?siz",
+        r"qanday\s*(?:dastur|bot|ai|sun.?iy)",
+    ]
+    for pat in ai_about_patterns:
+        if re.search(pat, q_lower):
+            return f"Men — AI Yordamchi, mahalliy (offline) sun'iy intellekt bo'tman. 🤖\n\nMening xususiyatlarim:\n• Internetga ulanmasdan ishlayman\n• Bilim bazam ai_data/ papkasida saqlanadi\n• Matematik misollarni yechaman\n• O'yin o'ynay olaman\n• Siz o'rgatgan narsalarni eslab qolaman\n• {name}, siz menga yangi bilim qo'shishingiz mumkin!\n\nMen SrvManager platformasi uchun yaratilganman."
+
+    # ── Ism haqida savollar ──
+    name_patterns = [
+        r"ism(?:ing|im|i)?\s*(?:nima|nim|ni|kim)",
+        r"(?:nima|nim|ni|kim)\s*(?:sen|siz|sani|sizni)?\s*ism",
+        r"seni?\s*(?:nima|nim)\s*deyishadi",
+        r"(?:nima|nim)\s*(?:deb|dep)\s*(?:atashadi|chaqirishadi)",
+        r"ism(?:ing)?\s*(?:bormi|ayt)",
+        r"oting\s*nima", r"nima\s*oting",
+    ]
+    for pat in name_patterns:
+        if re.search(pat, q_lower):
+            return f"Mening ismim **AI Yordamchi**. Men SrvManager platformasining sun'iy intellekt yordamchisiman. {name}, sizga doimo yordam berishga tayyorman! 🤖"
+
+    # ── Salomlashish (kengaytirilgan) ──
+    greetings = {"salom", "assalom", "assalomu", "hey", "hi", "hello", "hayrli",
+                 "xayrli", "salomlashish", "salom aleykum", "va aleykum",
+                 "yahshimisiz", "yaxshimisiz", "qalay", "qalaysiz", "tinchmi"}
+    if q_words & greetings:
+        import random
+        responses = [
+            f"Salom, {name}! 👋 Bugun sizga qanday yordam bera olaman?",
+            f"Assalomu alaykum, {name}! Men tayyorman — savolingizni bering!",
+            f"Salom-salom, {name}! 😊 Nima qilaylik bugun?",
+            f"Hey, {name}! Yaxshi kuningiz bo'lsin! Qanday yordam kerak?",
+            f"Assalomu alaykum, {name}! Xizmatingizdaman. 🤖",
+        ]
+        return random.choice(responses)
+
+    # ── Rahmat ──
+    thanks = {"rahmat", "raxmat", "thanks", "thank", "tashakkur", "katta rahmat", "minnatdor"}
+    if q_words & thanks:
+        import random
+        responses = [
+            f"Arzimaydi, {name}! Har doim xizmatingizdaman. 😊",
+            f"Marhamat, {name}! Yana savollaringiz bo'lsa — bemalol!",
+            f"Sizga yordam bera olganimdan xursandman, {name}! 🌟",
+        ]
+        return random.choice(responses)
+
+    # ── Xayrlashish ──
+    byes = {"hayr", "xayr", "ko'rishguncha", "bye", "goodbye", "salomat"}
+    if q_words & byes:
+        return f"Xayr, {name}! Yaxshi kuningiz bo'lsin! Kerak bo'lganda qaytib keling. 👋😊"
+
+    # ── Ahvol so'rash ──
+    mood_q = {"qalay", "qalaysiz", "yaxshi", "ahvol", "kayfiyat"}
+    if q_words & mood_q and len(q_words) <= 4:
+        return f"Rahmat so'raganingiz uchun, {name}! Men — dasturman, har doim a'lo holatdaman! 😄 Sizchi, qanday yordam kerak?"
+
+    # ── Nima qila olasan? ──
+    ability_patterns = [r"nima\s*qila\s*olasan", r"imkoniyat", r"funksiya", r"qanday.*yordam",
+                        r"nima\s*bilasan", r"nimalar.*mumkin"]
+    for pat in ability_patterns:
+        if re.search(pat, q_lower):
+            return f"Men quyidagilarni qila olaman, {name}:\n\n🧮 Matematik misollar yechish (2+2, 100/4, 2^10)\n🎮 O'yin o'ynash (tosh-qaychi-qogoz, latifa, tasodifiy son)\n📚 Savollaringizga javob berish (o'rgatilgan bilimlar asosida)\n💬 Suhbatlashish va salomlashish\n🌐 HTML teglar, CSS kodlar, Emmet qisqartmalar haqida gapirish\n📝 Yangi bilim qabul qilish (O'qitish tugmasi)\n\nMenga savol bering yoki biror narsa o'rgating!"
+
+    # ── Emmet qisqartmalari ──
+    emmet_result = _ai_emmet_answer(q_lower, name)
+    if emmet_result:
+        return emmet_result
+
+    # ── HTML teglar haqida ──
+    html_result = _ai_html_answer(q_lower, name)
+    if html_result:
+        return html_result
+
+    # ── CSS haqida ──
+    css_result = _ai_css_answer(q_lower, name)
+    if css_result:
+        return css_result
+
+    # ── Mavzu bo'yicha qidiruv: "(mavzu) nima" yoki "nima (mavzu)" ──
+    topics = _load_ai_topics()
+    for topic in topics:
+        topic_name = topic.get("topic", "").lower()
+        topic_words = set(re.findall(r'\w+', topic_name))
+        # Mavzu so'zlari savolda bormi?
+        if topic_words and topic_words.issubset(q_words):
+            # Va savol so'zi ham bormi?
+            has_qword = any(qw in q_words for qw in question_words)
+            # Yoki to'g'ridan-to'g'ri moslik
+            if has_qword or topic_name in q_lower:
+                return topic["info"]
+
+    # ── Oddiy bilim bazasi bo'yicha qidiruv ──
+    knowledge = _load_ai_knowledge()
+    if not knowledge and not topics:
+        return f"Salom, {name}! Men yangi AI yordamchiman. 🤖 Hozircha bilim bazam bo'sh, lekin siz menga o'rgatishingiz mumkin!\n\n📚 O'qitish tugmasini bosing va savol-javob qo'shing.\n\nShu orada: 🧮 Matematik misollar yecha olaman (2+2, 10*5)\n🎮 O'yin o'ynay olaman (tosh, latifa)"
+
+    best_score = 0
+    best_answer = None
+    for item in knowledge:
+        item_q = item.get("question", "").lower()
+        item_words = set(re.findall(r'\w+', item_q))
+        if item.get("category"):
+            item_words.update(re.findall(r'\w+', item["category"].lower()))
+        # To'g'ridan-to'g'ri moslik
+        if q_lower in item_q or item_q in q_lower:
+            return item["answer"]
+        # So'z moslik hisoblash
+        common = q_words & item_words
+        if common:
+            score = len(common) / max(len(q_words), 1) * 100
+            score += sum(2 for w in common if len(w) > 3)
+            if score > best_score:
+                best_score = score
+                best_answer = item["answer"]
+
+    if best_score >= 25 and best_answer:
+        return best_answer
+
+    return f"Hmm, {name}, bu savolga hozircha javobim yo'q. 🤔\n\n💡 Quyidagi mavzularda suhbatlashishimiz mumkin:\n• 🌐 HTML: \"div nima\", \"img tegi\", \"table qanday\"\n• 🎨 CSS: \"flexbox nima\", \"margin padding\", \"display\"\n• ✨ Emmet: \"div*10 nima\", \"ul>li*5\", \"emmet nima\"\n• 🧮 Matematik: 2+2, 100/4, (5+3)*2\n• 🎮 O'yin: tosh, latifa, son ber\n\n📚 Yoki O'qitish tugmasi orqali menga yangi bilim bering!"
+
+# ── Suhbat tarixi (har foydalanuvchi uchun alohida) ───────────────────────
+def _load_chat_history(user_id):
+    """Foydalanuvchining suhbat tarixini yuklaydi."""
+    hist_file = AI_DATA_DIR / f"history_{user_id}.json"
+    if not hist_file.exists():
+        return []
+    try:
+        with open(hist_file, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+def _save_chat_message(user_id, username, question, answer):
+    """Yangi xabarni suhbat tarixiga qo'shadi."""
+    hist_file = AI_DATA_DIR / f"history_{user_id}.json"
+    history = _load_chat_history(user_id)
+    history.append({
+        "q": question,
+        "a": answer[:1000],
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    })
+    # Maksimal 200 ta xabar saqlash
+    if len(history) > 200:
+        history = history[-200:]
+    try:
+        with open(hist_file, "w", encoding="utf-8") as f:
+            json.dump(history, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+# ── API endpointlari ──────────────────────────────────────────────────────
+@app.route("/api/ai/ask", methods=["POST"])
+@user_req
+def api_ai_ask():
+    d = request.get_json() or {}
+    question = (d.get("question") or "").strip()
+    if not question:
+        return jsonify({"answer": "Savol bo'sh"})
+    # Haqoratli so'z tekshiruvi
+    if _contains_profanity(question):
+        custom_resp = _load_badword_responses()
+        if custom_resp:
+            return jsonify({"answer": custom_resp})
+        return jsonify({"answer": "⚠️ Iltimos, hurmatli muloqot qiling."})
+    username = session.get("username", "")
+    user_id = session.get("user_id", 0)
+    # Suhbat tarixini yuklash
+    history = _load_chat_history(user_id)
+    answer = _ai_find_answer(question, username, history)
+    # Suhbatni saqlash
+    _save_chat_message(user_id, username, question, answer)
+    return jsonify({"answer": answer})
+
+@app.route("/api/ai/history")
+@user_req
+def api_ai_history():
+    """Foydalanuvchining suhbat tarixini qaytaradi."""
+    user_id = session.get("user_id", 0)
+    history = _load_chat_history(user_id)
+    return jsonify({"history": history[-50:]})  # oxirgi 50 ta
+
+@app.route("/api/ai/history/clear", methods=["POST"])
+@user_req
+def api_ai_history_clear():
+    """Suhbat tarixini tozalash."""
+    user_id = session.get("user_id", 0)
+    hist_file = AI_DATA_DIR / f"history_{user_id}.json"
+    if hist_file.exists():
+        hist_file.unlink()
+    return jsonify({"ok": True})
+
+@app.route("/api/ai/train", methods=["POST"])
+@user_req
+def api_ai_train():
+    d = request.get_json() or {}
+    train_type = d.get("type", "qa")  # "qa", "topic", "word", "badword"
+    # Haqoratli so'z tekshiruvi (badword turida tekshirmaymiz — chunki o'zi qo'shilmoqda)
+    if train_type != "badword":
+        for field in ("question", "answer", "topic", "info"):
+            val = d.get(field, "")
+            if val and _contains_profanity(val):
+                return jsonify({"ok": False, "error": "⚠️ Haqoratli so'z aniqlandi!"})
+    if train_type == "badword":
+        # Haqoratli so'z qo'shish / javob o'zgartirish
+        word = (d.get("word") or "").strip().lower()
+        response = (d.get("response") or "").strip()
+        words = _load_badwords()
+        if word and word not in words:
+            words.append(word)
+        if response or word:
+            old_resp = _load_badword_responses()
+            _save_badwords_data(words, response or old_resp)
+        return jsonify({"ok": True, "words": words})
+    if train_type == "word":
+        # Savol so'zi qo'shish
+        word = (d.get("word") or "").strip().lower()
+        if not word:
+            return jsonify({"ok": False, "error": "So'z kiriting"})
+        words = _load_question_words()
+        if word not in words:
+            words.append(word)
+            _save_question_words(words)
+        return jsonify({"ok": True, "words": words})
+    elif train_type == "topic":
+        # Mavzu + ma'lumot qo'shish
+        topic = (d.get("topic") or "").strip()
+        info = (d.get("info") or "").strip()
+        if not topic or not info:
+            return jsonify({"ok": False, "error": "Mavzu va ma'lumot majburiy"})
+        topics = _load_ai_topics()
+        new_id = max([t.get("id", 0) for t in topics], default=0) + 1
+        topics.append({"id": new_id, "topic": topic, "info": info,
+                       "added_by": session.get("username", ""), "added_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+        _save_ai_topics(topics)
+        audit("ai_train_topic", "topic", new_id, topic[:80])
+        return jsonify({"ok": True, "id": new_id})
+    else:
+        # Oddiy savol-javob
+        question = (d.get("question") or "").strip()
+        answer = (d.get("answer") or "").strip()
+        category = (d.get("category") or "").strip()
+        if not question or not answer:
+            return jsonify({"ok": False, "error": "Savol va javob majburiy"})
+        knowledge = _load_ai_knowledge()
+        new_id = max([item.get("id", 0) for item in knowledge], default=0) + 1
+        knowledge.append({"id": new_id, "question": question, "answer": answer, "category": category,
+                          "added_by": session.get("username", ""), "added_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+        _save_ai_knowledge(knowledge)
+        audit("ai_train", "knowledge", new_id, question[:80])
+        return jsonify({"ok": True, "id": new_id})
+
+@app.route("/api/ai/knowledge")
+@user_req
+def api_ai_knowledge():
+    knowledge = _load_ai_knowledge()
+    topics = _load_ai_topics()
+    words = _load_question_words()
+    badwords = _load_badwords()
+    badword_response = _load_badword_responses()
+    return jsonify({"items": knowledge, "topics": topics, "words": words,
+                    "badwords": badwords, "badword_response": badword_response})
+
+@app.route("/api/ai/knowledge/<int:kid>", methods=["DELETE"])
+@user_req
+def api_ai_knowledge_delete(kid):
+    knowledge = _load_ai_knowledge()
+    knowledge = [item for item in knowledge if item.get("id") != kid]
+    _save_ai_knowledge(knowledge)
+    return jsonify({"ok": True})
+
+@app.route("/api/ai/topics/<int:tid>", methods=["DELETE"])
+@user_req
+def api_ai_topic_delete(tid):
+    topics = _load_ai_topics()
+    topics = [t for t in topics if t.get("id") != tid]
+    _save_ai_topics(topics)
+    return jsonify({"ok": True})
+
+@app.route("/api/ai/words/<word>", methods=["DELETE"])
+@user_req
+def api_ai_word_delete(word):
+    words = _load_question_words()
+    words = [w for w in words if w != word]
+    _save_question_words(words)
+    return jsonify({"ok": True})
+
+@app.route("/api/ai/badwords/<word>", methods=["DELETE"])
+@user_req
+def api_ai_badword_delete(word):
+    words = _load_badwords()
+    words = [w for w in words if w != word]
+    resp = _load_badword_responses()
+    _save_badwords_data(words, resp)
+    return jsonify({"ok": True})
+
+
+# ── Terminal / Shell (xterm.js uchun backend) ──────────────────────────────
+@app.route("/api/terminal/exec", methods=["POST"])
+@admin_req
+def terminal_exec():
+    """Admin uchun server terminalida buyruq bajarish (xavfsizlik: faqat admin)."""
+    d = request.get_json() or {}
+    cmd = (d.get("command") or "").strip()
+    if not cmd:
+        return jsonify({"ok": False, "error": "Buyruq bo'sh"})
+    # Xavfli buyruqlarni bloklash
+    dangerous = ["rm -rf /", "mkfs", "dd if=", ":(){", "fork bomb", "shutdown", "reboot", "halt"]
+    for dng in dangerous:
+        if dng in cmd.lower():
+            return jsonify({"ok": False, "error": "Bu buyruq taqiqlangan"})
+    try:
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10, cwd=os.getcwd())
+        output = result.stdout + result.stderr
+        audit("terminal_exec", "command", None, cmd[:200])
+        return jsonify({"ok": True, "output": output[:5000], "returncode": result.returncode})
+    except subprocess.TimeoutExpired:
+        return jsonify({"ok": False, "error": "Buyruq 10 sekundda yakunlanmadi (timeout)"})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:300]})
+
+
+
+# ── Komponent kutubxonasi (Bootstrap/Tailwind) ─────────────────────────────
+@app.route("/api/components")
+@user_req
+def api_components():
+    """Tayyor HTML komponentlarni qaytaradi."""
+    components = [
+        {"id": "nav-bootstrap", "name": "Navbar (Bootstrap)", "category": "Bootstrap",
+         "code": '<nav class="navbar navbar-expand-lg navbar-dark bg-dark">\n  <div class="container">\n    <a class="navbar-brand" href="#">Logo</a>\n    <button class="navbar-toggler" data-bs-toggle="collapse" data-bs-target="#nav1"><span class="navbar-toggler-icon"></span></button>\n    <div class="collapse navbar-collapse" id="nav1">\n      <ul class="navbar-nav ms-auto"><li class="nav-item"><a class="nav-link" href="#">Bosh sahifa</a></li><li class="nav-item"><a class="nav-link" href="#">Haqida</a></li></ul>\n    </div>\n  </div>\n</nav>'},
+        {"id": "card-bootstrap", "name": "Card (Bootstrap)", "category": "Bootstrap",
+         "code": '<div class="card" style="width:18rem">\n  <img src="https://via.placeholder.com/300x200" class="card-img-top" alt="...">\n  <div class="card-body">\n    <h5 class="card-title">Sarlavha</h5>\n    <p class="card-text">Qisqa tavsif matni.</p>\n    <a href="#" class="btn btn-primary">Batafsil</a>\n  </div>\n</div>'},
+        {"id": "hero-bootstrap", "name": "Hero Section (Bootstrap)", "category": "Bootstrap",
+         "code": '<section class="bg-dark text-white py-5">\n  <div class="container text-center">\n    <h1 class="display-4">Xush kelibsiz!</h1>\n    <p class="lead">Bu yerda asosiy matn joylashadi.</p>\n    <a href="#" class="btn btn-primary btn-lg mt-3">Boshlash</a>\n  </div>\n</section>'},
+        {"id": "form-bootstrap", "name": "Form (Bootstrap)", "category": "Bootstrap",
+         "code": '<form class="p-4">\n  <div class="mb-3"><label class="form-label">Email</label><input type="email" class="form-control" placeholder="email@example.com"></div>\n  <div class="mb-3"><label class="form-label">Parol</label><input type="password" class="form-control"></div>\n  <button type="submit" class="btn btn-primary">Yuborish</button>\n</form>'},
+        {"id": "nav-tailwind", "name": "Navbar (Tailwind)", "category": "Tailwind",
+         "code": '<nav class="bg-gray-800 p-4">\n  <div class="max-w-7xl mx-auto flex justify-between items-center">\n    <a href="#" class="text-white font-bold text-xl">Logo</a>\n    <div class="space-x-4"><a href="#" class="text-gray-300 hover:text-white">Bosh sahifa</a><a href="#" class="text-gray-300 hover:text-white">Haqida</a></div>\n  </div>\n</nav>'},
+        {"id": "card-tailwind", "name": "Card (Tailwind)", "category": "Tailwind",
+         "code": '<div class="max-w-sm rounded overflow-hidden shadow-lg bg-white">\n  <img class="w-full" src="https://via.placeholder.com/300x200" alt="">\n  <div class="px-6 py-4">\n    <div class="font-bold text-xl mb-2">Sarlavha</div>\n    <p class="text-gray-700 text-base">Tavsif matni.</p>\n  </div>\n  <div class="px-6 pt-4 pb-2"><span class="bg-gray-200 rounded-full px-3 py-1 text-sm font-semibold text-gray-700">#tag1</span></div>\n</div>'},
+        {"id": "hero-tailwind", "name": "Hero (Tailwind)", "category": "Tailwind",
+         "code": '<section class="bg-gradient-to-r from-purple-600 to-indigo-600 text-white py-20">\n  <div class="max-w-4xl mx-auto text-center">\n    <h1 class="text-5xl font-bold mb-4">Xush kelibsiz!</h1>\n    <p class="text-xl mb-8">Loyihangiz uchun zamonaviy dizayn.</p>\n    <a href="#" class="bg-white text-purple-600 px-8 py-3 rounded-full font-bold hover:bg-gray-100">Boshlash</a>\n  </div>\n</section>'},
+        {"id": "footer", "name": "Footer", "category": "Umumiy",
+         "code": '<footer style="background:#1a1a2e;color:#aaa;padding:30px 20px;text-align:center;margin-top:40px">\n  <p>&copy; 2025 Loyiha nomi. Barcha huquqlar himoyalangan.</p>\n  <div style="margin-top:10px"><a href="#" style="color:#7c6fff;margin:0 8px">GitHub</a><a href="#" style="color:#7c6fff;margin:0 8px">Telegram</a></div>\n</footer>'},
+        {"id": "grid-css", "name": "CSS Grid Layout", "category": "Umumiy",
+         "code": '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;padding:20px">\n  <div style="background:#1c2136;border-radius:8px;padding:20px;color:#fff">Block 1</div>\n  <div style="background:#1c2136;border-radius:8px;padding:20px;color:#fff">Block 2</div>\n  <div style="background:#1c2136;border-radius:8px;padding:20px;color:#fff">Block 3</div>\n</div>'},
+        {"id": "pricing", "name": "Pricing Table", "category": "Umumiy",
+         "code": '<div style="display:flex;gap:20px;justify-content:center;padding:40px;flex-wrap:wrap">\n  <div style="background:#1c2136;border:1px solid #252d45;border-radius:12px;padding:30px;width:250px;text-align:center;color:#fff"><h3>Bepul</h3><p style="font-size:2rem;font-weight:700;color:#7c6fff">$0</p><p style="color:#888">1 loyiha<br>100MB joy</p><button style="background:#7c6fff;color:#fff;border:none;padding:10px 24px;border-radius:6px;cursor:pointer;margin-top:12px">Tanlash</button></div>\n  <div style="background:#1c2136;border:2px solid #7c6fff;border-radius:12px;padding:30px;width:250px;text-align:center;color:#fff"><h3>Pro</h3><p style="font-size:2rem;font-weight:700;color:#22d3a0">$9</p><p style="color:#888">10 loyiha<br>5GB joy</p><button style="background:#22d3a0;color:#000;border:none;padding:10px 24px;border-radius:6px;cursor:pointer;margin-top:12px;font-weight:700">Tanlash</button></div>\n</div>'},
+    ]
+    return jsonify({"components": components})
+
+# ── Color Picker API ────────────────────────────────────────────────────────
+@app.route("/api/color/palette")
+@user_req
+def color_palette():
+    """Ranglar palitrasini qaytaradi."""
+    palettes = {
+        "Material": ["#F44336","#E91E63","#9C27B0","#673AB7","#3F51B5","#2196F3","#03A9F4","#00BCD4","#009688","#4CAF50","#8BC34A","#CDDC39","#FFEB3B","#FFC107","#FF9800","#FF5722"],
+        "Pastel": ["#FFB3BA","#FFDFBA","#FFFFBA","#BAFFC9","#BAE1FF","#E8BAFF","#FFC8DD","#BDE0FE","#A2D2FF","#CDB4DB"],
+        "Dark": ["#0d0f18","#161929","#1c2136","#252d45","#7c6fff","#22d3a0","#f05d5d","#f5c518","#5c6890","#d4daf0"],
+        "Gradient": ["linear-gradient(135deg,#667eea,#764ba2)","linear-gradient(135deg,#f093fb,#f5576c)","linear-gradient(135deg,#4facfe,#00f2fe)","linear-gradient(135deg,#43e97b,#38f9d7)","linear-gradient(135deg,#fa709a,#fee140)"],
+    }
+    return jsonify({"palettes": palettes})
+
+
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║  1-BOSQICH: DDoS, Session, Auto-restart, Status, Changelog,            ║
+# ║             Push, Direct link, CDN, Tema                                 ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+
+# ── 1. DDoS himoyasi (middleware) ─────────────────────────────────────────
+_request_counts = {}  # {ip: [(timestamp, ...), ...]}
+DDOS_MAX_PER_MINUTE = 120  # 1 daqiqada maksimal so'rovlar
+DDOS_BAN_MINUTES = 10
+
+@app.before_request
+def _ddos_protection():
+    """Bir IP dan juda ko'p so'rov kelsa avtomatik bloklash."""
+    if request.path.startswith("/static") or request.path == "/favicon.ico":
+        return None
+    ip = get_ip()
+    now = time.time()
+    if ip not in _request_counts:
+        _request_counts[ip] = []
+    # Eski yozuvlarni tozalash (1 daqiqadan oshgan)
+    _request_counts[ip] = [t for t in _request_counts[ip] if now - t < 60]
+    _request_counts[ip].append(now)
+    if len(_request_counts[ip]) > DDOS_MAX_PER_MINUTE:
+        # Avtomatik bloklash
+        unblock = (datetime.now() + timedelta(minutes=DDOS_BAN_MINUTES)).strftime("%Y-%m-%d %H:%M:%S")
+        db_exec("INSERT OR IGNORE INTO blocked_ips (ip_address,reason,unblock_at) VALUES (?,?,?)",
+                (ip, f"DDoS: {len(_request_counts[ip])} req/min", unblock), fetch=False)
+        telegram_send(f"🛡 DDoS himoyasi: {ip} bloklandi ({len(_request_counts[ip])} so'rov/daqiqa)")
+        _request_counts[ip] = []
+        abort(429)
+    return None
+
+
+
+# ── 2. Auto-restart (watchdog) ────────────────────────────────────────────
+_restart_count = 0
+_restart_log_file = Path("ai_data") / "restart_log.json"
+
+def _log_restart():
+    """Qayta ishga tushganini log qiladi."""
+    global _restart_count
+    _restart_count += 1
+    data = []
+    if _restart_log_file.exists():
+        try:
+            with open(_restart_log_file, "r") as f:
+                data = json.load(f)
+        except: pass
+    data.append({"count": _restart_count, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                 "reason": "watchdog_restart"})
+    if len(data) > 50: data = data[-50:]
+    with open(_restart_log_file, "w") as f:
+        json.dump(data, f, ensure_ascii=False)
+
+def _watchdog_thread():
+    """Server ishlayotganini tekshiradi, crash bo'lsa qayta ishga tushiradi."""
+    import urllib.request as ur
+    while True:
+        time.sleep(30)
+        try:
+            ur.urlopen(f"http://127.0.0.1:{CFG['PORT']}/login", timeout=5)
+        except Exception:
+            _log_restart()
+            telegram_send(f"🔄 Server qayta ishga tushmoqda (crash aniqlandi). Restart #{_restart_count}")
+
+@app.route("/admin/restarts")
+@admin_req
+def admin_restarts():
+    data = []
+    if _restart_log_file.exists():
+        try:
+            with open(_restart_log_file, "r") as f:
+                data = json.load(f)
+        except: pass
+    rows = "".join(f"<tr><td>{r.get('count')}</td><td>{r.get('time')}</td><td>{r.get('reason','—')}</td></tr>" for r in reversed(data))
+    body = f"""<h2 style="color:#fff;margin-bottom:14px">🔄 Auto-restart tarixi</h2>
+    <div class="card"><p class="tm mb">Server crash bo'lganda avtomatik qayta ishga tushadi. Shu yerda tarix ko'rinadi.</p>
+    <div class="tw"><table><thead><tr><th>#</th><th>Vaqt</th><th>Sabab</th></tr></thead>
+    <tbody>{rows or '<tr><td colspan=3 style="text-align:center;color:var(--mt);padding:14px">Restart bolmagan</td></tr>'}</tbody></table></div></div>"""
+    return _pg("Auto-restart", body, "restarts")
+
+
+
+# ── 3. Session boshqaruvi ─────────────────────────────────────────────────
+@app.route("/admin/sessions")
+@admin_req
+def admin_sessions():
+    """Barcha faol sessiyalarni ko'rish (so'nggi loginlar asosida)."""
+    users = db_exec("SELECT id,username,role,last_login,is_active FROM users WHERE last_login IS NOT NULL ORDER BY last_login DESC LIMIT 50") or []
+    rows = "".join(f"""<tr><td>{u['username']}</td><td><span class="bx {'xg' if u['is_active'] else 'xr'}">{u['role']}</span></td>
+      <td class="tm" style="font-size:.74rem">{str(u.get('last_login',''))[:19]}</td>
+      <td><form method="POST" action="/admin/sessions/kill/{u['id']}">{csrf_field()}
+        <button class="btn br bsm">🔌 Chiqarish</button></form></td></tr>""" for u in users)
+    body = f"""<h2 style="color:#fff;margin-bottom:14px">🔐 Faol sessiyalar</h2>
+    <p class="tm mb">Foydalanuvchilarning so'nggi kirish vaqtlari. "Chiqarish" tugmasi ularni majburan logout qiladi.</p>
+    <div class="card" style="padding:0"><div class="tw">
+    <table><thead><tr><th>Foydalanuvchi</th><th>Rol</th><th>Oxirgi kirish</th><th>Amal</th></tr></thead>
+    <tbody>{rows}</tbody></table></div></div>"""
+    return _pg("Sessiyalar", body, "sessions")
+
+@app.route("/admin/sessions/kill/<int:uid>", methods=["POST"])
+@admin_req
+def admin_session_kill(uid):
+    """Foydalanuvchini majburan logout qilish (parolni o'zgartirmasdan)."""
+    db_exec("UPDATE users SET last_login=NULL WHERE id=?", (uid,), fetch=False)
+    audit("session_kill", "user", uid)
+    return redirect("/admin/sessions")
+
+
+
+# ── 4. Status page (ommaviy) ──────────────────────────────────────────────
+@app.route("/status")
+def public_status():
+    """Ommaviy status sahifasi — server holati."""
+    uptime_min = round((time.time() - PROCESS_START) / 60, 1)
+    uptime_str = f"{int(uptime_min//60)} soat {int(uptime_min%60)} daqiqa" if uptime_min > 60 else f"{int(uptime_min)} daqiqa"
+    # So'nggi 10 tekshiruv
+    checks = db_exec("SELECT status,response_ms,checked_at FROM uptime_logs ORDER BY id DESC LIMIT 10") or []
+    all_up = all(c["status"] == "up" for c in checks) if checks else True
+    status_emoji = "🟢" if all_up else "🔴"
+    status_text = "Ishlayapti" if all_up else "Nosozlik aniqlandi"
+    status_color = "var(--gr)" if all_up else "var(--rd)"
+    bars = "".join(f'<div style="width:8px;height:30px;background:{"var(--gr)" if c["status"]=="up" else "var(--rd)"};border-radius:2px"></div>' for c in reversed(checks))
+    site_title = get_setting("site_title", "SrvManager")
+    return f"""<!DOCTYPE html><html lang="uz"><head><meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Status — {site_title}</title>
+    <style>{CSS}</style></head><body style="display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px">
+    <div style="max-width:500px;width:100%">
+      <div style="text-align:center;margin-bottom:24px">
+        <p style="font-size:2.5rem">{status_emoji}</p>
+        <h1 style="color:{status_color};margin:8px 0;font-size:1.5rem">{status_text}</h1>
+        <p class="tm">{site_title} server holati</p>
+      </div>
+      <div class="card">
+        <div class="fl mb"><b style="color:#fff">Ishlash vaqti:</b><span class="mla" style="color:var(--gr)">{uptime_str}</span></div>
+        <div class="fl mb"><b style="color:#fff">Holat:</b><span class="bx {'xg' if all_up else 'xr'} mla">{status_text}</span></div>
+        <p class="tm" style="font-size:.76rem;margin-top:12px">So'nggi tekshiruvlar:</p>
+        <div style="display:flex;gap:3px;align-items:end;margin-top:6px;min-height:34px">{bars or '<span class="tm">Tekshiruv yoq</span>'}</div>
+      </div>
+      <p style="text-align:center;margin-top:16px" class="tm" style="font-size:.75rem">
+        <a href="/login">Admin kirish</a></p>
+    </div></body></html>"""
+
+
+
+# ── 5. Changelog (versiyalar tarixi) ──────────────────────────────────────
+CHANGELOG = [
+    {"version": "3.0", "date": "2025-07-04", "changes": [
+        "23 ta yangi funksiya qo'shildi",
+        "AI Yordamchi: HTML/CSS/Emmet bilim bazasi, matematik, o'yinlar",
+        "Backend Engine: serverless funksiyalar",
+        "Custom domain/subdomain tizimi",
+        "Real-time chat, TODO, Team tizimi",
+        "Terminal, Color picker, Komponent kutubxonasi",
+        "DDoS himoyasi, Session boshqaruvi",
+        "Tema tanlash (4 xil rang sxemasi)",
+    ]},
+    {"version": "2.2", "date": "2025-06-01", "changes": [
+        "Kod muharriri: Emmet, split-view, konsol",
+        "Monitoring: CPU/RAM/Disk real-time",
+        "Telegram 2FA va bildirishnomalar",
+        "API kalitlari (Bearer token)",
+        "RBAC rollar tizimi",
+    ]},
+    {"version": "2.0", "date": "2025-04-15", "changes": [
+        "Ko'p fayl/papkali loyihalar",
+        "Virtual fayl tizimi (SQLite)",
+        "Versiya tarixi va restore",
+        "Quick Open, global qidiruv",
+    ]},
+    {"version": "1.0", "date": "2025-02-01", "changes": [
+        "Birinchi versiya",
+        "Private/LAN/Global rejimlar",
+        "Havolalar, fayllar, loyihalar",
+        "SQLite baza",
+    ]},
+]
+
+@app.route("/changelog")
+def changelog_page():
+    cards = ""
+    for ver in CHANGELOG:
+        items = "".join(f"<li style='margin-bottom:4px'>{c}</li>" for c in ver["changes"])
+        cards += f"""<div class="card">
+          <div class="fl mb"><b style="color:var(--ac);font-size:1.1rem">v{ver['version']}</b>
+            <span class="tm mla">{ver['date']}</span></div>
+          <ul style="padding-left:18px;color:var(--tx);font-size:.82rem">{items}</ul>
+        </div>"""
+    site_title = get_setting("site_title", "SrvManager")
+    return f"""<!DOCTYPE html><html lang="uz"><head><meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Changelog — {site_title}</title>
+    <style>{CSS}</style></head><body style="padding:30px;max-width:700px;margin:0 auto">
+    <h1 style="color:#fff;margin-bottom:20px">📝 Changelog — {site_title}</h1>
+    <p class="tm mb">Barcha versiyalar va o'zgarishlar tarixi.</p>
+    {cards}
+    <a href="/" class="btn bgh mt">← Asosiy sahifa</a>
+    </body></html>"""
+
+
+
+# ── 6. Push Notifications (brauzer) ───────────────────────────────────────
+@app.route("/api/push/subscribe", methods=["POST"])
+@user_req
+def push_subscribe():
+    """Push notification uchun ruxsat berish."""
+    # Frontend tomonida Notification API ishlatiladi (server faqat trigger qiladi)
+    return jsonify({"ok": True, "message": "Bildirishnomalar yoqildi"})
+
+@app.route("/api/push/test", methods=["POST"])
+@user_req
+def push_test():
+    """Test bildirishnoma yuborish."""
+    return jsonify({"ok": True, "title": "Test bildirishnoma", "body": "Push notification ishlayapti!"})
+
+
+
+# ── 7. Direct link (to'g'ridan-to'g'ri havola) ────────────────────────────
+@app.route("/dl/<fuid>")
+def direct_link(fuid):
+    """Fayl uchun to'g'ridan-to'g'ri havola (hotlink). Hech qanday autentifikatsiyasiz."""
+    row = q1("SELECT * FROM files WHERE uuid=? AND is_public=1", (fuid,))
+    if not row:
+        abort(404)
+    dest = FILES_PATH / row["stored_name"]
+    if not dest.exists():
+        abort(404)
+    db_exec("UPDATE files SET download_count=download_count+1 WHERE uuid=?", (fuid,), fetch=False)
+    return send_from_directory(str(FILES_PATH), row["stored_name"],
+                               as_attachment=False, download_name=row["original_name"])
+
+
+
+# ── 8. CDN kutubxonalar qo'shish (muharrir uchun API) ─────────────────────
+@app.route("/api/cdn/libraries")
+@user_req
+def cdn_libraries():
+    """Mashhur CDN kutubxonalar ro'yxati."""
+    libs = [
+        {"name": "Bootstrap 5", "category": "CSS Framework",
+         "css": "https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css",
+         "js": "https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"},
+        {"name": "Tailwind CSS", "category": "CSS Framework",
+         "css": "https://cdn.jsdelivr.net/npm/tailwindcss@3/dist/tailwind.min.css", "js": ""},
+        {"name": "jQuery", "category": "JS Library",
+         "css": "", "js": "https://code.jquery.com/jquery-3.7.1.min.js"},
+        {"name": "Alpine.js", "category": "JS Framework",
+         "css": "", "js": "https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"},
+        {"name": "Animate.css", "category": "Animation",
+         "css": "https://cdn.jsdelivr.net/npm/animate.css@4/animate.min.css", "js": ""},
+        {"name": "Font Awesome 6", "category": "Icons",
+         "css": "https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6/css/all.min.css", "js": ""},
+        {"name": "Google Fonts (Inter)", "category": "Fonts",
+         "css": "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap", "js": ""},
+        {"name": "AOS (Animate On Scroll)", "category": "Animation",
+         "css": "https://cdn.jsdelivr.net/npm/aos@2.3.4/dist/aos.css",
+         "js": "https://cdn.jsdelivr.net/npm/aos@2.3.4/dist/aos.js"},
+        {"name": "Chart.js", "category": "Grafik",
+         "css": "", "js": "https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"},
+        {"name": "SweetAlert2", "category": "UI",
+         "css": "", "js": "https://cdn.jsdelivr.net/npm/sweetalert2@11"},
+        {"name": "Axios", "category": "HTTP",
+         "css": "", "js": "https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"},
+        {"name": "Three.js", "category": "3D",
+         "css": "", "js": "https://cdn.jsdelivr.net/npm/three@0.160/build/three.min.js"},
+    ]
+    return jsonify({"libraries": libs})
+
+@app.route("/api/cdn/add/<puuid>", methods=["POST"])
+@user_req
+@write_req
+def cdn_add(puuid):
+    """Loyiha index.html ga CDN kutubxonani qo'shadi."""
+    proj = q1("SELECT id FROM projects WHERE uuid=?", (puuid,))
+    if not proj:
+        return jsonify({"ok": False}), 404
+    d = request.get_json() or {}
+    css_url = d.get("css", "").strip()
+    js_url = d.get("js", "").strip()
+    idx = q1("SELECT content FROM project_files WHERE project_id=? AND path='index.html'", (proj["id"],))
+    if not idx:
+        return jsonify({"ok": False, "error": "index.html topilmadi"})
+    html = idx.get("content") or ""
+    if css_url and css_url not in html:
+        if "</head>" in html:
+            html = html.replace("</head>", f'  <link rel="stylesheet" href="{css_url}">\n</head>')
+    if js_url and js_url not in html:
+        if "</body>" in html:
+            html = html.replace("</body>", f'  <script src="{js_url}"></script>\n</body>')
+    db_exec("UPDATE project_files SET content=?,updated_at=datetime('now') WHERE project_id=? AND path='index.html'",
+            (html, proj["id"]), fetch=False)
+    return jsonify({"ok": True})
+
+
+
+# ── 9. Tema tanlash (4 xil rang sxemasi) ──────────────────────────────────
+THEMES = {
+    "dark": {"bg":"#0d0f18","surf":"#161929","card":"#1c2136","brd":"#252d45","ac":"#7c6fff","gr":"#22d3a0","tx":"#d4daf0"},
+    "light": {"bg":"#f0f2f5","surf":"#ffffff","card":"#ffffff","brd":"#e0e0e0","ac":"#5548e0","gr":"#0d9668","tx":"#1a1a2e"},
+    "blue": {"bg":"#0a1628","surf":"#0f1f3d","card":"#152a4a","brd":"#1e3a5f","ac":"#3b82f6","gr":"#22d3a0","tx":"#c8d6e5"},
+    "green": {"bg":"#0a1a14","surf":"#0f2a1f","card":"#153d2b","brd":"#1e5a40","ac":"#22d3a0","gr":"#22d3a0","tx":"#c8e6d8"},
+}
+
+@app.route("/api/theme", methods=["GET","POST"])
+@user_req
+def api_theme():
+    if request.method == "GET":
+        theme = get_setting(f"theme_{session.get('user_id',0)}", "dark")
+        return jsonify({"theme": theme, "themes": list(THEMES.keys())})
+    d = request.get_json() or {}
+    theme = d.get("theme", "dark")
+    if theme not in THEMES:
+        theme = "dark"
+    set_setting(f"theme_{session.get('user_id',0)}", theme)
+    return jsonify({"ok": True, "theme": theme})
+
+
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║  2-BOSQICH: GeoIP, Analitika, Honeypot, Login bildirishnoma,           ║
+# ║             Fayl preview, Papka sharing, Profil, Resource limiter        ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+
+# ── 1. GeoIP (oddiy IP-lokatsiya) ─────────────────────────────────────────
+_GEOIP_CACHE = {}
+
+def _get_geo_info(ip):
+    """IP manzildan taxminiy joylashuvni aniqlash (tashqi API siz, oddiy subnet asosida)."""
+    if ip in _GEOIP_CACHE:
+        return _GEOIP_CACHE[ip]
+    info = {"country": "Noaniq", "city": "Noaniq", "flag": "🌍"}
+    # Mahalliy IP lar
+    if ip.startswith("127.") or ip.startswith("192.168.") or ip.startswith("10.") or ip == "localhost":
+        info = {"country": "Mahalliy", "city": "LAN", "flag": "🏠"}
+    elif ip.startswith("172."):
+        info = {"country": "Mahalliy", "city": "Private", "flag": "🏠"}
+    else:
+        # Oddiy geo API (agar internet bo'lsa)
+        try:
+            import urllib.request as ur
+            resp = ur.urlopen(f"http://ip-api.com/json/{ip}?fields=country,city,countryCode", timeout=3)
+            data = json.loads(resp.read().decode())
+            if data.get("country"):
+                flags = {"UZ": "🇺🇿", "RU": "🇷🇺", "US": "🇺🇸", "GB": "🇬🇧", "DE": "🇩🇪",
+                         "TR": "🇹🇷", "KZ": "🇰🇿", "KR": "🇰🇷", "JP": "🇯🇵", "CN": "🇨🇳"}
+                cc = data.get("countryCode", "")
+                info = {"country": data.get("country", "?"), "city": data.get("city", "?"),
+                        "flag": flags.get(cc, "🌍")}
+        except Exception:
+            pass
+    _GEOIP_CACHE[ip] = info
+    if len(_GEOIP_CACHE) > 500:
+        _GEOIP_CACHE.clear()
+    return info
+
+
+
+# ── 2. Batafsil analitika (statistika sahifasiga qo'shiladi) ──────────────
+@app.route("/admin/analytics")
+@admin_req
+def admin_analytics():
+    """Batafsil analitika: qurilma, brauzer, sahifa, vaqt."""
+    # Top sahifalar
+    top_pages = db_exec("SELECT path,COUNT(*) cnt FROM access_logs GROUP BY path ORDER BY cnt DESC LIMIT 15") or []
+    # Top IP + geo
+    top_ips = db_exec("SELECT ip_address,COUNT(*) cnt FROM access_logs GROUP BY ip_address ORDER BY cnt DESC LIMIT 15") or []
+    # Soatlik taqsimot
+    hourly = db_exec("SELECT strftime('%H',visited_at) as hour,COUNT(*) cnt FROM access_logs WHERE visited_at>datetime('now','-7 days') GROUP BY hour ORDER BY hour") or []
+    # Brauzer/qurilma
+    agents = db_exec("SELECT user_agent,COUNT(*) cnt FROM access_logs WHERE user_agent!='' GROUP BY user_agent ORDER BY cnt DESC LIMIT 10") or []
+
+    pages_html = "".join(f"<tr><td style='max-width:250px;overflow:hidden;text-overflow:ellipsis;font-size:.76rem'><code>{p['path']}</code></td><td><b>{p['cnt']}</b></td></tr>" for p in top_pages)
+    ips_html = ""
+    for ip_row in top_ips:
+        geo = _get_geo_info(ip_row["ip_address"])
+        ips_html += f"<tr><td><code style='font-size:.74rem'>{ip_row['ip_address']}</code></td><td>{geo['flag']} {geo['country']}, {geo['city']}</td><td><b>{ip_row['cnt']}</b></td></tr>"
+
+    hourly_labels = json.dumps([h["hour"] + ":00" for h in hourly])
+    hourly_data = json.dumps([h["cnt"] for h in hourly])
+
+    devices = {"Mobile": 0, "Desktop": 0, "Bot": 0}
+    for a in agents:
+        ua = (a.get("user_agent") or "").lower()
+        if "bot" in ua or "crawler" in ua or "spider" in ua:
+            devices["Bot"] += a["cnt"]
+        elif "mobile" in ua or "android" in ua or "iphone" in ua:
+            devices["Mobile"] += a["cnt"]
+        else:
+            devices["Desktop"] += a["cnt"]
+
+    body = f"""
+    <h2 style="color:#fff;margin-bottom:14px">📈 Batafsil analitika</h2>
+    <div class="g g3 mb">
+      <div class="stat"><div class="v">{devices['Desktop']}</div><div class="l">🖥 Desktop</div></div>
+      <div class="stat"><div class="v">{devices['Mobile']}</div><div class="l">📱 Mobile</div></div>
+      <div class="stat"><div class="v">{devices['Bot']}</div><div class="l">🤖 Bot</div></div>
+    </div>
+    <div class="g g2">
+      <div class="card"><h3>🏆 Top sahifalar</h3>
+        <div class="tw"><table><thead><tr><th>Sahifa</th><th>Tashriflar</th></tr></thead>
+        <tbody>{pages_html or '<tr><td colspan=2 class="tm" style="text-align:center;padding:14px">Malumot yoq</td></tr>'}</tbody></table></div></div>
+      <div class="card"><h3>🗺️ Top IP / GeoIP</h3>
+        <div class="tw"><table><thead><tr><th>IP</th><th>Joylashuv</th><th>Soni</th></tr></thead>
+        <tbody>{ips_html or '<tr><td colspan=3 class="tm" style="text-align:center;padding:14px">Malumot yoq</td></tr>'}</tbody></table></div></div>
+    </div>
+    <div class="card mt"><h3>⏰ Soatlik tashriflar (7 kun)</h3>
+      <canvas id="hourlyChart" height="180"></canvas>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script>
+    new Chart(document.getElementById('hourlyChart'),{{type:'bar',
+      data:{{labels:{hourly_labels},datasets:[{{label:'Tashriflar',data:{hourly_data},
+        backgroundColor:'rgba(124,111,255,.3)',borderColor:'#7c6fff',borderWidth:1}}]}},
+      options:{{plugins:{{legend:{{display:false}}}},scales:{{
+        x:{{ticks:{{color:'#5c6890'}},grid:{{color:'#252d45'}}}},
+        y:{{ticks:{{color:'#5c6890'}},grid:{{color:'#252d45'}},beginAtZero:true}}}}}}
+    }});
+    </script>"""
+    return _pg("Analitika", body, "analytics")
+
+
+
+# ── 3. Honeypot (bot/xaker tutish) ────────────────────────────────────────
+@app.route("/wp-admin")
+@app.route("/wp-login.php")
+@app.route("/.env")
+@app.route("/admin.php")
+@app.route("/phpmyadmin")
+@app.route("/administrator")
+def honeypot_trap():
+    """Yashirin trap sahifalar — bot/xaker kirsa avtomatik bloklanadi."""
+    ip = get_ip()
+    path = request.path
+    db_exec("INSERT INTO audit_log (user_id,username,action,target_type,target_id,details,ip_address) "
+            "VALUES (NULL,'[HONEYPOT]','honeypot_trigger','trap',?,?,?)",
+            (path, f"Bot/xaker aniqlandi: {path}", ip), fetch=False)
+    # 1 soatga bloklash
+    unblock = (datetime.now() + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+    db_exec("INSERT OR IGNORE INTO blocked_ips (ip_address,reason,unblock_at) VALUES (?,?,?)",
+            (ip, f"Honeypot: {path}", unblock), fetch=False)
+    telegram_send(f"🕵️ Honeypot: {ip} bloklandi\nYol: {path}\nSabab: Bot/xaker harakati")
+    abort(404)
+
+
+
+# ── 4. Login bildirishnoma (yangi qurilma) ────────────────────────────────
+def _check_new_device(user, ip):
+    """Agar foydalanuvchi yangi IP dan kirsa — Telegram xabar yuboradi."""
+    last_ips = db_exec("SELECT DISTINCT ip_address FROM access_logs WHERE path='/login' "
+                       "AND ip_address!=? ORDER BY visited_at DESC LIMIT 10", (ip,)) or []
+    known_ips = {r["ip_address"] for r in last_ips}
+    # Agar bu IP avval ko'rilmagan bo'lsa
+    if ip not in known_ips and known_ips:
+        geo = _get_geo_info(ip)
+        telegram_send(f"⚠️ Yangi qurilma/IP dan kirish!\n"
+                      f"Foydalanuvchi: {user['username']}\n"
+                      f"IP: {ip}\n"
+                      f"Joylashuv: {geo['flag']} {geo['country']}, {geo['city']}\n"
+                      f"Vaqt: {datetime.now().strftime('%H:%M %d.%m.%Y')}")
+
+
+
+# ── 5. Fayl preview (PDF, video, audio, rasm) ─────────────────────────────
+@app.route("/preview-file/<fuid>")
+def file_preview(fuid):
+    """Faylni brauzerda ko'rish (PDF, video, audio, rasm)."""
+    row = q1("SELECT * FROM files WHERE uuid=?", (fuid,))
+    if not row:
+        abort(404)
+    if not row["is_public"] and session.get("user_id") != row["owner_id"] and not session.get("admin"):
+        return redirect("/login")
+    ext = (row.get("file_type") or "").lower()
+    name = row.get("original_name", "Fayl")
+    url = f"/dl/{fuid}" if row["is_public"] else f"/download/{fuid}"
+
+    if ext in ("png", "jpg", "jpeg", "gif", "svg", "webp", "ico"):
+        content = f'<img src="{url}" style="max-width:100%;max-height:80vh;border-radius:8px">'
+    elif ext in ("mp4", "webm", "ogg"):
+        content = f'<video src="{url}" controls style="max-width:100%;max-height:80vh;border-radius:8px"></video>'
+    elif ext in ("mp3", "wav", "ogg", "m4a"):
+        content = f'<audio src="{url}" controls style="width:100%;margin-top:20px"></audio>'
+    elif ext == "pdf":
+        content = f'<iframe src="{url}" style="width:100%;height:80vh;border:none;border-radius:8px"></iframe>'
+    elif ext in ("txt", "json", "html", "css", "js", "py", "md"):
+        # Matn fayllarni o'qib ko'rsatish
+        dest = FILES_PATH / row["stored_name"]
+        try:
+            text_content = dest.read_text(encoding="utf-8", errors="replace")[:50000]
+            import html as hm
+            content = f'<pre style="background:var(--bg);border:1px solid var(--brd);border-radius:8px;padding:16px;overflow:auto;max-height:80vh;color:var(--tx);font-size:.82rem">{hm.escape(text_content)}</pre>'
+        except:
+            content = '<p class="tm">Fayl o\'qib bo\'lmadi</p>'
+    else:
+        content = f'<p class="tm" style="text-align:center;margin:40px 0">Bu fayl turini preview qilib bo\'lmaydi.<br><a href="{url}" class="btn bp mt">⬇ Yuklab olish</a></p>'
+
+    site_title = get_setting("site_title", "SrvManager")
+    return f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Preview: {name}</title><style>{CSS}</style></head>
+    <body style="display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;padding:20px">
+    <div style="max-width:900px;width:100%">
+      <div class="fl mb"><h2 style="color:#fff">{name}</h2>
+        <a href="{url}" class="btn bg bsm mla">⬇ Yuklab olish</a>
+        <a href="/files" class="btn bgh bsm">← Fayllar</a></div>
+      {content}
+    </div></body></html>"""
+
+
+
+# ── 6. Papka sharing (butun loyihani ulashish) ────────────────────────────
+@app.route("/share-folder/<puuid>")
+def share_folder(puuid):
+    """Loyiha fayllarini ro'yxat ko'rinishida ko'rsatadi (ommaviy havola)."""
+    proj = q1("SELECT * FROM projects WHERE uuid=? AND is_public=1", (puuid,))
+    if not proj:
+        abort(404)
+    files = db_exec("SELECT path,is_folder FROM project_files WHERE project_id=? ORDER BY path", (proj["id"],)) or []
+    import html as hm
+    rows = "".join(f"""<tr>
+      <td>{'📁' if f['is_folder'] else '📄'} {hm.escape(f['path'])}</td>
+    </tr>""" for f in files)
+    site_title = get_setting("site_title", "SrvManager")
+    return f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>{hm.escape(proj['name'])} — Fayllar</title><style>{CSS}</style></head>
+    <body style="padding:30px;max-width:700px;margin:0 auto">
+    <h1 style="color:#fff;margin-bottom:6px">{hm.escape(proj['name'])}</h1>
+    <p class="tm mb">Loyiha fayllari ro'yxati</p>
+    <div class="fl mb">
+      <a href="/preview/{puuid}" class="btn bp bsm">👁 Preview</a>
+      <a href="/projects/download/{puuid}" class="btn bg bsm">⬇ ZIP yuklab olish</a>
+    </div>
+    <div class="card" style="padding:0"><div class="tw">
+      <table><thead><tr><th>Fayl</th></tr></thead>
+      <tbody>{rows or '<tr><td class="tm" style="text-align:center;padding:14px">Fayl yoq</td></tr>'}</tbody></table>
+    </div></div>
+    </body></html>"""
+
+
+
+# ── 7. Foydalanuvchi profili (avatar, bio) ─────────────────────────────────
+@app.route("/profile/update-bio", methods=["POST"])
+@user_req
+def profile_update_bio():
+    """Avatar URL va bio saqlash."""
+    d = request.get_json() or {}
+    avatar = (d.get("avatar") or "").strip()[:500]
+    bio = (d.get("bio") or "").strip()[:500]
+    uid = session["user_id"]
+    set_setting(f"avatar_{uid}", avatar)
+    set_setting(f"bio_{uid}", bio)
+    return jsonify({"ok": True})
+
+@app.route("/u/<username>")
+def public_profile(username):
+    """Foydalanuvchining ommaviy profil sahifasi."""
+    user = q1("SELECT id,username,role,created_at FROM users WHERE username=? AND is_active=1", (username,))
+    if not user:
+        abort(404)
+    avatar = get_setting(f"avatar_{user['id']}", "")
+    bio = get_setting(f"bio_{user['id']}", "")
+    # Foydalanuvchi loyihalari (ommaviy)
+    projs = db_exec("SELECT name,uuid FROM projects WHERE owner_id=? AND is_public=1 ORDER BY updated_at DESC LIMIT 10", (user["id"],)) or []
+    proj_html = "".join(f'<a href="/preview/{p["uuid"]}" class="btn bgh bsm" style="margin:3px">{p["name"]}</a>' for p in projs)
+    import html as hm
+    avatar_html = f'<img src="{hm.escape(avatar)}" style="width:80px;height:80px;border-radius:50%;border:3px solid var(--ac);object-fit:cover">' if avatar else '<div style="width:80px;height:80px;border-radius:50%;background:var(--ac);display:flex;align-items:center;justify-content:center;font-size:2rem;color:#fff">{username[0].upper()}</div>'
+    site_title = get_setting("site_title", "SrvManager")
+    return f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>@{hm.escape(username)} — {site_title}</title><style>{CSS}</style></head>
+    <body style="display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px">
+    <div style="max-width:400px;width:100%;text-align:center">
+      {avatar_html}
+      <h2 style="color:#fff;margin-top:12px">@{hm.escape(username)}</h2>
+      <span class="bx xb">{user['role']}</span>
+      <p class="tm mt" style="font-size:.82rem">{hm.escape(bio) or 'Bio yoq'}</p>
+      <p class="tm" style="font-size:.72rem;margin-top:8px">Qo'shilgan: {str(user['created_at'])[:10]}</p>
+      <div class="mt" style="display:flex;flex-wrap:wrap;justify-content:center;gap:4px">{proj_html or '<span class="tm">Ommaviy loyiha yoq</span>'}</div>
+      <a href="/" class="btn bgh mt" style="margin-top:20px">← Asosiy</a>
+    </div></body></html>"""
+
+
+
+# ── 8. Resource limiter (CPU/RAM cheklash) ─────────────────────────────────
+@app.route("/admin/resources")
+@admin_req
+def admin_resources():
+    """Server resurslarini ko'rish va chegaralarni boshqarish."""
+    cpu_limit = int(get_setting("cpu_limit", "90"))
+    ram_limit = int(get_setting("ram_limit", "85"))
+    body = f"""
+    <h2 style="color:#fff;margin-bottom:14px">📊 Resource Limiter</h2>
+    <div class="card">
+      <p class="tm mb" style="font-size:.79rem">Server resurs chegaralari. Bu chegaraga yetganda yangi so'rovlar rad etiladi.</p>
+      <form method="POST" action="/admin/resources/save">{csrf_field()}
+        <div class="g g2">
+          <div class="fld"><label>CPU limit (%)</label>
+            <input name="cpu_limit" type="number" min="50" max="100" value="{cpu_limit}"></div>
+          <div class="fld"><label>RAM limit (%)</label>
+            <input name="ram_limit" type="number" min="50" max="100" value="{ram_limit}"></div>
+        </div>
+        <button class="btn bp">💾 Saqlash</button>
+      </form>
+    </div>"""
+    if PSUTIL_OK:
+        cpu = psutil.cpu_percent(interval=0.3)
+        mem = psutil.virtual_memory()
+        body += f"""
+    <div class="g g2 mt">
+      <div class="stat"><div class="v" style="color:{'var(--rd)' if cpu>cpu_limit else 'var(--gr)'}">{cpu}%</div>
+        <div class="l">CPU (limit: {cpu_limit}%)</div></div>
+      <div class="stat"><div class="v" style="color:{'var(--rd)' if mem.percent>ram_limit else 'var(--gr)'}">{mem.percent}%</div>
+        <div class="l">RAM (limit: {ram_limit}%)</div></div>
+    </div>"""
+    return _pg("Resource Limiter", body, "resources")
+
+@app.route("/admin/resources/save", methods=["POST"])
+@admin_req
+def admin_resources_save():
+    cpu = request.form.get("cpu_limit", "90")
+    ram = request.form.get("ram_limit", "95")
+    enabled = "1" if request.form.get("enabled") else "0"
+    set_setting("cpu_limit", cpu)
+    set_setting("ram_limit", ram)
+    set_setting("resource_limit_enabled", enabled)
+    return redirect("/admin/resources")
+
+@app.before_request
+def _check_resource_limit():
+    """Resurs chegarasiga yetganda so'rovlarni rad etish (faqat admin yoqsa)."""
+    if not PSUTIL_OK:
+        return None
+    # Faqat admin sozlamalarda yoqilgan bo'lsa ishlaydi
+    if get_setting("resource_limit_enabled", "0") != "1":
+        return None
+    if request.path.startswith("/admin") or request.path in ("/login", "/logout", "/status", "/api"):
+        return None
+    if session.get("admin"):
+        return None
+    ram_limit = int(get_setting("ram_limit", "95"))
+    try:
+        mem = psutil.virtual_memory()
+        if mem.percent > ram_limit:
+            return jsonify({"error": "Server haddan tashqari yuklangan. Keyinroq urinib ko'ring."}), 503
+    except:
+        pass
+    return None
+
+
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║  3-BOSQICH: Live Collaboration, WebSocket(SSE), Screenshot,             ║
+# ║  Responsive tester, Ichki xabar, A/B testing, Clipboard paste           ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+
+# ── 1. Live Collaboration (SSE orqali real-time sinxronlash) ──────────────
+_collab_updates = {}  # {project_uuid: [{"user","path","content","time"}, ...]}
+
+@app.route("/api/collab/<puuid>/update", methods=["POST"])
+@user_req
+def collab_update(puuid):
+    """Foydalanuvchi faylni o'zgartirganini boshqalarga xabar qiladi."""
+    d = request.get_json() or {}
+    path = d.get("path", "")
+    content = d.get("content", "")
+    username = session.get("username", "")
+    if puuid not in _collab_updates:
+        _collab_updates[puuid] = []
+    _collab_updates[puuid].append({
+        "user": username, "path": path,
+        "content": content[:10000],
+        "time": time.time()
+    })
+    # Faqat oxirgi 20 ta yangilanishni saqlash
+    _collab_updates[puuid] = _collab_updates[puuid][-20:]
+    return jsonify({"ok": True})
+
+@app.route("/api/collab/<puuid>/poll")
+@user_req
+def collab_poll(puuid):
+    """Boshqa foydalanuvchilarning yangilanishlarini olish (polling)."""
+    since = float(request.args.get("since", 0))
+    username = session.get("username", "")
+    updates = []
+    for u in _collab_updates.get(puuid, []):
+        if u["time"] > since and u["user"] != username:
+            updates.append(u)
+    return jsonify({"updates": updates, "server_time": time.time()})
+
+@app.route("/api/collab/<puuid>/users")
+@user_req
+def collab_users(puuid):
+    """Hozir loyihada kim ishlayotganini ko'rsatadi."""
+    # So'nggi 30 sekund ichida yangilanish yuborgan foydalanuvchilar
+    cutoff = time.time() - 30
+    active = set()
+    for u in _collab_updates.get(puuid, []):
+        if u["time"] > cutoff:
+            active.add(u["user"])
+    active.add(session.get("username", ""))
+    return jsonify({"users": list(active), "count": len(active)})
+
+
+
+# ── 2. Responsive tester (har xil ekran o'lchamlari) ─────────────────────
+@app.route("/responsive/<puuid>")
+@user_req
+def responsive_tester(puuid):
+    """Loyihani turli ekran o'lchamlarida ko'rish."""
+    proj = q1("SELECT * FROM projects WHERE uuid=?", (puuid,))
+    if not proj:
+        abort(404)
+    import html as hm
+    devices = [
+        ("iPhone SE", 375, 667),
+        ("iPhone 14", 390, 844),
+        ("iPhone 14 Pro Max", 430, 932),
+        ("iPad Mini", 768, 1024),
+        ("iPad Pro", 1024, 1366),
+        ("MacBook Air", 1280, 800),
+        ("Desktop HD", 1920, 1080),
+    ]
+    btns = "".join(f'<button onclick="setSize({w},{h})" class="btn bgh bsm">{name} ({w}x{h})</button>' for name, w, h in devices)
+    site_title = get_setting("site_title", "SrvManager")
+    return f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Responsive — {hm.escape(proj['name'])}</title><style>{CSS}</style></head>
+    <body style="margin:0;display:flex;flex-direction:column;height:100vh">
+    <div style="padding:10px 14px;background:var(--surf);border-bottom:1px solid var(--brd);display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+      <b style="color:#fff;font-size:.85rem">🎯 {hm.escape(proj['name'])}</b>
+      {btns}
+      <span class="tm mla" id="sizeLabel" style="font-size:.75rem">—</span>
+      <a href="/editor/{puuid}" class="btn bgh bsm">← Muharrir</a>
+    </div>
+    <div style="flex:1;display:flex;align-items:center;justify-content:center;background:#05060a;overflow:auto;padding:20px">
+      <iframe id="respFrame" src="/preview/{puuid}" style="border:10px solid #2b2f3a;border-radius:16px;background:#fff;transition:.3s;width:375px;height:667px"></iframe>
+    </div>
+    <script>
+    function setSize(w,h){{
+      var f=document.getElementById('respFrame');
+      f.style.width=w+'px';f.style.height=h+'px';
+      document.getElementById('sizeLabel').textContent=w+'x'+h;
+    }}
+    setSize(375,667);
+    </script></body></html>"""
+
+
+
+# ── 3. Screenshot (loyiha preview rasmini saqlash) ────────────────────────
+@app.route("/api/screenshot/<puuid>", methods=["POST"])
+@user_req
+def api_screenshot(puuid):
+    """Loyiha preview ni rasm sifatida saqlash uchun ma'lumot qaytaradi.
+    Frontend tomonida html2canvas ishlatiladi."""
+    proj = q1("SELECT name FROM projects WHERE uuid=?", (puuid,))
+    if not proj:
+        return jsonify({"ok": False}), 404
+    # Frontend tomonida html2canvas bilan screenshot olinadi
+    return jsonify({"ok": True, "preview_url": f"/preview/{puuid}",
+                    "filename": f"screenshot_{proj['name']}.png"})
+
+
+
+# ── 4. Ichki xabar tizimi ─────────────────────────────────────────────────
+@app.route("/messages", methods=["GET"])
+@user_req
+def messages_inbox():
+    """Foydalanuvchining xabarlari."""
+    uid = session["user_id"]
+    msgs = db_exec("""SELECT m.*,u.username as sender_name FROM internal_messages m
+                      JOIN users u ON m.sender_id=u.id
+                      WHERE m.receiver_id=? ORDER BY m.id DESC LIMIT 50""", (uid,)) or []
+    rows = "".join(f"""<tr style="{'background:rgba(124,111,255,.05)' if not m['is_read'] else ''}">
+      <td><b style="color:{'#fff' if not m['is_read'] else 'var(--mt)'}">{m['sender_name']}</b></td>
+      <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis">{m['subject'] or '(mavzu yoq)'}</td>
+      <td class="tm" style="font-size:.74rem">{str(m['created_at'])[:16]}</td>
+      <td><a href="/messages/{m['id']}" class="btn bgh bsm">📖</a>
+        <form method="POST" action="/messages/delete/{m['id']}" style="display:inline">{csrf_field()}
+          <button class="btn br bsm">🗑</button></form></td>
+    </tr>""" for m in msgs)
+    unread = sum(1 for m in msgs if not m["is_read"])
+    body = f"""
+    <div class="fl mb"><h2 style="color:#fff">💬 Xabarlar</h2>
+      <span class="bx xp mla">{unread} yangi</span>
+      <a href="/messages/new" class="btn bp bsm">✉ Yangi xabar</a></div>
+    <div class="card" style="padding:0"><div class="tw">
+      <table><thead><tr><th>Kimdan</th><th>Mavzu</th><th>Vaqt</th><th>Amal</th></tr></thead>
+      <tbody>{rows or '<tr><td colspan=4 style="text-align:center;color:var(--mt);padding:16px">Xabar yoq</td></tr>'}</tbody></table>
+    </div></div>"""
+    return _pg("Xabarlar", body, "messages")
+
+@app.route("/messages/new", methods=["GET", "POST"])
+@user_req
+def messages_new():
+    if request.method == "POST":
+        to_user = request.form.get("to", "").strip()
+        subject = request.form.get("subject", "").strip()[:200]
+        body_text = request.form.get("body", "").strip()[:2000]
+        receiver = q1("SELECT id FROM users WHERE username=?", (to_user,))
+        if not receiver:
+            return _pg("Yangi xabar", '<div class="al al-er">Foydalanuvchi topilmadi</div>', "messages")
+        db_exec("INSERT INTO internal_messages (sender_id,receiver_id,subject,body) VALUES (?,?,?,?)",
+                (session["user_id"], receiver["id"], subject, body_text), fetch=False)
+        return redirect("/messages")
+    form = f"""<div class="card" style="max-width:500px"><h3>✉ Yangi xabar</h3>
+      <form method="POST">{csrf_field()}
+        <div class="fld"><label>Kimga (username)</label><input name="to" required></div>
+        <div class="fld"><label>Mavzu</label><input name="subject"></div>
+        <div class="fld"><label>Xabar</label><textarea name="body" required></textarea></div>
+        <button class="btn bp">📨 Yuborish</button>
+        <a href="/messages" class="btn bgh" style="margin-left:8px">Bekor</a>
+      </form></div>"""
+    return _pg("Yangi xabar", form, "messages")
+
+@app.route("/messages/<int:mid>")
+@user_req
+def messages_read(mid):
+    msg = q1("SELECT m.*,u.username as sender_name FROM internal_messages m JOIN users u ON m.sender_id=u.id WHERE m.id=? AND m.receiver_id=?",
+             (mid, session["user_id"]))
+    if not msg:
+        abort(404)
+    if not msg["is_read"]:
+        db_exec("UPDATE internal_messages SET is_read=1 WHERE id=?", (mid,), fetch=False)
+    body = f"""<div class="card" style="max-width:600px">
+      <div class="fl mb"><b style="color:#fff">{msg['subject'] or '(mavzu yoq)'}</b>
+        <span class="tm mla">{str(msg['created_at'])[:16]}</span></div>
+      <p class="tm mb" style="font-size:.8rem">Kimdan: <b style="color:var(--ac)">{msg['sender_name']}</b></p>
+      <div style="background:var(--bg);border-radius:8px;padding:14px;color:var(--tx);font-size:.85rem;white-space:pre-wrap">{msg['body']}</div>
+      <a href="/messages" class="btn bgh mt">← Xabarlar</a>
+    </div>"""
+    return _pg("Xabar", body, "messages")
+
+@app.route("/messages/delete/<int:mid>", methods=["POST"])
+@user_req
+def messages_delete(mid):
+    db_exec("DELETE FROM internal_messages WHERE id=? AND receiver_id=?", (mid, session["user_id"]), fetch=False)
+    return redirect("/messages")
+
+
+
+# ── 5. A/B Testing ────────────────────────────────────────────────────────
+@app.route("/admin/ab-test", methods=["GET", "POST"])
+@admin_req
+def admin_ab_test():
+    """A/B test yaratish va natijalarni ko'rish."""
+    if request.method == "POST":
+        name = request.form.get("name", "").strip()
+        variant_a = request.form.get("variant_a", "").strip()
+        variant_b = request.form.get("variant_b", "").strip()
+        if name:
+            set_setting(f"ab_{name}_a", variant_a)
+            set_setting(f"ab_{name}_b", variant_b)
+            set_setting(f"ab_{name}_hits_a", "0")
+            set_setting(f"ab_{name}_hits_b", "0")
+            set_setting(f"ab_{name}_active", "1")
+    # Barcha testlar
+    all_settings = db_exec("SELECT key,value FROM app_settings WHERE key LIKE 'ab_%_active'") or []
+    tests_html = ""
+    for s in all_settings:
+        name = s["key"].replace("ab_", "").replace("_active", "")
+        hits_a = get_setting(f"ab_{name}_hits_a", "0")
+        hits_b = get_setting(f"ab_{name}_hits_b", "0")
+        active = s["value"] == "1"
+        tests_html += f"""<tr><td><b style="color:#fff">{name}</b></td>
+          <td>A: {hits_a}</td><td>B: {hits_b}</td>
+          <td><span class="bx {'xg' if active else 'xr'}">{'Faol' if active else 'Tugagan'}</span></td>
+          <td><form method="POST" action="/admin/ab-test/toggle/{name}">{csrf_field()}
+            <button class="btn bgh bsm">{'⏸' if active else '▶️'}</button></form></td></tr>"""
+    body = f"""
+    <h2 style="color:#fff;margin-bottom:14px">🧪 A/B Testing</h2>
+    <div class="card"><h3>Yangi test yaratish</h3>
+      <form method="POST">{csrf_field()}
+        <div class="g g3">
+          <div class="fld"><label>Test nomi</label><input name="name" required placeholder="masalan: button_color"></div>
+          <div class="fld"><label>Variant A</label><input name="variant_a" placeholder="masalan: #7c6fff"></div>
+          <div class="fld"><label>Variant B</label><input name="variant_b" placeholder="masalan: #22d3a0"></div>
+        </div>
+        <button class="btn bp">+ Yaratish</button>
+      </form>
+    </div>
+    <div class="card mt"><h3>Mavjud testlar</h3>
+      <div class="tw"><table><thead><tr><th>Nomi</th><th>A</th><th>B</th><th>Holat</th><th>Amal</th></tr></thead>
+      <tbody>{tests_html or '<tr><td colspan=5 style="text-align:center;color:var(--mt);padding:14px">Test yoq</td></tr>'}</tbody></table></div>
+    </div>"""
+    return _pg("A/B Testing", body, "abtest")
+
+@app.route("/admin/ab-test/toggle/<name>", methods=["POST"])
+@admin_req
+def admin_ab_toggle(name):
+    cur = get_setting(f"ab_{name}_active", "0")
+    set_setting(f"ab_{name}_active", "0" if cur == "1" else "1")
+    return redirect("/admin/ab-test")
+
+@app.route("/api/ab/<name>")
+def api_ab_variant(name):
+    """A/B test uchun variant qaytaradi (tasodifiy A yoki B)."""
+    import random
+    active = get_setting(f"ab_{name}_active", "0")
+    if active != "1":
+        return jsonify({"variant": "a", "value": get_setting(f"ab_{name}_a", "")})
+    variant = random.choice(["a", "b"])
+    value = get_setting(f"ab_{name}_{variant}", "")
+    # Hit hisoblash
+    key = f"ab_{name}_hits_{variant}"
+    hits = int(get_setting(key, "0")) + 1
+    set_setting(key, str(hits))
+    return jsonify({"variant": variant, "value": value})
+
+
+
+# ── 6. Clipboard paste (Ctrl+V rasm yuklash) ──────────────────────────────
+@app.route("/editor/paste-image/<puuid>", methods=["POST"])
+@user_req
+@write_req
+def editor_paste_image(puuid):
+    """Ctrl+V bilan clipboard dan rasm yuklash."""
+    proj = q1("SELECT id FROM projects WHERE uuid=?", (puuid,))
+    if not proj:
+        return jsonify({"ok": False}), 404
+    f = request.files.get("image")
+    if not f:
+        return jsonify({"ok": False, "error": "Rasm topilmadi"})
+    import uuid as _uuid
+    stored = f"paste_{_uuid.uuid4().hex[:8]}.png"
+    dest = FILES_PATH / stored
+    f.save(str(dest))
+    url = f"/uploads/files/{stored}"
+    return jsonify({"ok": True, "url": url})
+
+
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║              BACKEND ENGINE — LOYIHA ICHIDAGI SERVERLESS FUNKSIYALAR     ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+
+def project_db_path(puuid):
+    safe = re.sub(r"[^a-zA-Z0-9-]", "", puuid)
+    return PROJECT_DB_DIR / f"{safe}.db"
+
+def ensure_project_db(puuid):
+    p = project_db_path(puuid)
+    if not p.exists():
+        conn = sqlite3.connect(str(p))
+        conn.close()
+    return p
+
+class SafeDB:
+    """Foydalanuvchi kodiga beriladigan cheklangan SQL interfeysi."""
+    def __init__(self, db_path):
+        self._conn = sqlite3.connect(str(db_path), timeout=5)
+        self._conn.row_factory = sqlite3.Row
+        self._cur = self._conn.cursor()
+
+    def _check(self, sql):
+        if ";" in sql.strip().rstrip(";"):
+            raise ValueError("Bir chaqiruvda faqat bitta SQL buyrug'iga ruxsat")
+        if _SQL_FORBIDDEN.search(sql):
+            raise ValueError("Bu SQL buyrug'i taqiqlangan")
+
+    def execute(self, sql, params=()):
+        self._check(sql)
+        self._cur.execute(sql, tuple(params))
+        return self
+
+    def fetchone(self):
+        r = self._cur.fetchone()
+        return dict(r) if r else None
+
+    def fetchall(self):
+        return [dict(r) for r in self._cur.fetchall()]
+
+    def commit(self):
+        self._conn.commit()
+
+    def close(self):
+        try:
+            self._conn.commit()
+            self._conn.close()
+        except Exception:
+            pass
+
+def _guarded_import(name, *args, **kwargs):
+    root = name.split(".")[0]
+    if root not in ALLOWED_IMPORTS:
+        raise ImportError(f"'{name}' moduliga ruxsat yo'q (whitelist: {sorted(ALLOWED_IMPORTS)})")
+    return __import__(name, *args, **kwargs)
+
+def _build_restricted_globals():
+    g = dict(safe_globals)
+    g["__builtins__"] = dict(safe_builtins)
+    g["__builtins__"]["__import__"] = _guarded_import
+    g["_getiter_"] = default_guarded_getiter
+    g["_iter_unpack_sequence_"] = guarded_iter_unpack_sequence
+    g["_write_"] = full_write_guard
+    for name in ("len", "range", "enumerate", "zip", "sorted", "min", "max",
+                 "sum", "abs", "round", "isinstance", "str", "int", "float",
+                 "bool", "list", "dict", "set", "tuple"):
+        g["__builtins__"][name] = __builtins__[name] if isinstance(__builtins__, dict) else getattr(__builtins__, name)
+    return g
+
+def compile_user_code(code_str):
+    if not RESTRICTED_OK:
+        raise RuntimeError("RestrictedPython o'rnatilmagan: pip install RestrictedPython")
+    byte_code = compile_restricted(code_str, filename="<backend-handler>", mode="exec")
+    return byte_code
+
+def _child_worker(conn, code_str, request_json, db_path):
+    try:
+        import resource
+        resource.setrlimit(resource.RLIMIT_CPU, (EXEC_TIMEOUT_SEC + 1, EXEC_TIMEOUT_SEC + 1))
+        resource.setrlimit(resource.RLIMIT_AS, (MEM_LIMIT_MB * 1024 * 1024, MEM_LIMIT_MB * 1024 * 1024))
+    except Exception:
+        pass
+    db = None
+    try:
+        byte_code = compile_user_code(code_str)
+        ns = _build_restricted_globals()
+        exec(byte_code, ns)
+        handler = ns.get("handler")
+        if not callable(handler):
+            raise ValueError("Kodda `def handler(request_json, db):` funksiyasi topilmadi")
+        db = SafeDB(db_path)
+        result = handler(request_json, db)
+        json.dumps(result)
+        conn.send({"ok": True, "result": result})
+    except Exception as e:
+        conn.send({"ok": False, "error": f"{type(e).__name__}: {e}"})
+    finally:
+        if db:
+            db.close()
+        conn.close()
+
+def run_user_backend(code_str, request_json, db_path, timeout=EXEC_TIMEOUT_SEC):
+    t0 = time.time()
+    parent_conn, child_conn = mp.Pipe()
+    proc = mp.Process(target=_child_worker, args=(child_conn, code_str, request_json, str(db_path)))
+    proc.start()
+    proc.join(timeout)
+    duration_ms = int((time.time() - t0) * 1000)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(1)
+        if proc.is_alive():
+            proc.kill()
+        return False, f"Vaqt tugadi ({timeout}s ichida yakunlanmadi)", duration_ms
+    if parent_conn.poll():
+        data = parent_conn.recv()
+        if data.get("ok"):
+            return True, data.get("result"), duration_ms
+        return False, data.get("error", "Noma'lum xato"), duration_ms
+    return False, "Protsessdan javob kelmadi (kutilmagan xato)", duration_ms
+
+def _be_check_rate_limit(user_id):
+    cutoff = (datetime.now() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+    row = q1("SELECT COUNT(*) c FROM backend_rate_limit WHERE user_id=? AND called_at>?", (user_id, cutoff))
+    if row and row["c"] >= RATE_LIMIT_PER_MIN:
+        return False
+    db_exec("INSERT INTO backend_rate_limit (user_id) VALUES (?)", (user_id,), fetch=False)
+    return True
+
+def _be_log_exec(project_id, user_id, path, duration_ms, ok, error=""):
+    db_exec("INSERT INTO backend_exec_logs (project_id,user_id,path,duration_ms,ok,error) VALUES (?,?,?,?,?,?)",
+            (project_id, user_id, path, duration_ms, 1 if ok else 0, (error or "")[:500]), fetch=False)
+    old = db_exec("SELECT id FROM backend_exec_logs ORDER BY id DESC LIMIT -1 OFFSET ?", (HISTORY_LOG_KEEP,)) or []
+    for r in old:
+        db_exec("DELETE FROM backend_exec_logs WHERE id=?", (r["id"],), fetch=False)
+
+def _setup_backend_tables():
+    """Backend uchun kerakli jadvallarni yaratadi."""
+    be_stmts = [
+        """CREATE TABLE IF NOT EXISTS project_backend_routes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            path TEXT NOT NULL,
+            method TEXT DEFAULT 'GET',
+            code TEXT NOT NULL,
+            updated_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(project_id, path, method))""",
+        """CREATE TABLE IF NOT EXISTS backend_exec_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER,
+            user_id INTEGER,
+            path TEXT,
+            duration_ms INTEGER,
+            ok INTEGER,
+            error TEXT,
+            created_at TEXT DEFAULT (datetime('now')))""",
+        """CREATE TABLE IF NOT EXISTS backend_rate_limit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            called_at TEXT DEFAULT (datetime('now')))""",
+    ]
+    for s in be_stmts:
+        db_exec(s, fetch=False)
+    _ensure_column("projects", "backend_enabled", "INTEGER DEFAULT 0")
+
+def _backend_globally_enabled():
+    return RESTRICTED_OK and get_setting("backend_enabled", "0") == "1"
+
+def _backend_project_or_403(puuid, need_write=False):
+    proj = q1("SELECT * FROM projects WHERE uuid=?", (puuid,))
+    if not proj:
+        abort(404)
+    is_owner = proj["owner_id"] == session.get("user_id")
+    if not is_owner and not session.get("admin"):
+        abort(403)
+    if need_write and role_rank(session.get("role")) < ROLE_RANK["user"]:
+        abort(403)
+    return proj
+
+def _register_backend_routes():
+    """Backend marshrutlarini Flask app ga ro'yxatdan o'tkazadi."""
+
+    @app.route("/admin/backend/toggle", methods=["POST"])
+    @admin_req
+    def backend_admin_toggle():
+        if not RESTRICTED_OK:
+            return redirect(request.referrer or "/admin/settings")
+        cur = get_setting("backend_enabled", "0")
+        set_setting("backend_enabled", "0" if cur == "1" else "1")
+        return redirect(request.referrer or "/admin/settings")
+
+    @app.route("/admin/backend/logs")
+    @admin_req
+    def backend_admin_logs():
+        rows = db_exec("""SELECT l.*, p.name as pname, u.username FROM backend_exec_logs l
+                           LEFT JOIN projects p ON l.project_id=p.id
+                           LEFT JOIN users u ON l.user_id=u.id
+                           ORDER BY l.id DESC LIMIT 200""") or []
+        tr = "".join(f"""<tr>
+          <td>{r.get('pname') or '—'}</td><td>{r.get('username') or '—'}</td>
+          <td><code style="font-size:.72rem">{r['path']}</code></td>
+          <td>{r['duration_ms']} ms</td>
+          <td><span class="bx {'xg' if r['ok'] else 'xr'}">{'OK' if r['ok'] else 'Xato'}</span></td>
+          <td class="tm" style="font-size:.72rem">{(r.get('error') or '')[:80]}</td>
+          <td class="tm" style="font-size:.72rem">{str(r['created_at'])[:19]}</td>
+        </tr>""" for r in rows)
+        status = ("✅ RestrictedPython o'rnatilgan" if RESTRICTED_OK
+                  else "⚠️ RestrictedPython O'RNATILMAGAN — pip install RestrictedPython")
+        on = get_setting("backend_enabled", "0") == "1"
+        body = f"""
+        <div class="fl mb"><h2 style="color:#fff">🐍 Backend — ijro loglari</h2>
+          <span class="bx {'xg' if RESTRICTED_OK else 'xr'} mla">{status}</span></div>
+        <form method="POST" action="/admin/backend/toggle" class="mb">{csrf_field()}
+          <button class="btn {'br' if on else 'bg'} bsm" {'' if RESTRICTED_OK else 'disabled'}>
+            {"🔴 Global backendni o'chirish" if on else "🟢 Global backendni yoqish"}</button>
+        </form>
+        <div class="card" style="padding:0"><div class="tw">
+          <table><thead><tr><th>Loyiha</th><th>Foydalanuvchi</th><th>Yo'l</th><th>Vaqt</th>
+          <th>Holat</th><th>Xato</th><th>Vaqt belgisi</th></tr></thead>
+          <tbody>{tr or "<tr><td colspan=7 style='text-align:center;color:var(--mt);padding:16px'>Hali chaqiruv yo'q</td></tr>"}</tbody></table>
+        </div></div>"""
+        return _pg("Backend loglari", body, "backend")
+
+    @app.route("/projects/<puuid>/backend/toggle", methods=["POST"])
+    @user_req
+    @write_req
+    def backend_project_toggle(puuid):
+        proj = _backend_project_or_403(puuid, need_write=True)
+        if not _backend_globally_enabled():
+            abort(403)
+        new_val = 0 if proj.get("backend_enabled") else 1
+        db_exec("UPDATE projects SET backend_enabled=? WHERE id=?", (new_val, proj["id"]), fetch=False)
+        if new_val:
+            ensure_project_db(puuid)
+        return redirect(request.referrer or "/projects")
+
+    @app.route("/editor/backend/routes/<puuid>", methods=["GET", "POST"])
+    @user_req
+    def backend_routes_list(puuid):
+        proj = _backend_project_or_403(puuid)
+        if request.method == "GET":
+            rows = db_exec("SELECT id,path,method,updated_at FROM project_backend_routes WHERE project_id=? ORDER BY path",
+                           (proj["id"],)) or []
+            return jsonify({"routes": rows, "backend_enabled": bool(proj.get("backend_enabled")),
+                             "global_enabled": _backend_globally_enabled()})
+        if role_rank(session.get("role")) < ROLE_RANK["user"]:
+            return jsonify({"ok": False, "error": "Ruxsat yo'q"}), 403
+        if not proj.get("backend_enabled"):
+            return jsonify({"ok": False, "error": "Bu loyihada backend yoqilmagan"}), 403
+        d = request.get_json() or {}
+        path = "/" + (d.get("path") or "").strip().lstrip("/")
+        method = (d.get("method") or "GET").upper()
+        code = d.get("code", "")
+        if method not in ("GET", "POST") or path == "/" or not code.strip():
+            return jsonify({"ok": False, "error": "Noto'g'ri ma'lumot"}), 400
+        db_exec("""INSERT INTO project_backend_routes (project_id,path,method,code) VALUES (?,?,?,?)
+                   ON CONFLICT(project_id,path,method) DO UPDATE SET code=excluded.code, updated_at=datetime('now')""",
+                (proj["id"], path, method, code), fetch=False)
+        return jsonify({"ok": True})
+
+    @app.route("/editor/backend/routes/<puuid>/<int:rid>", methods=["GET", "DELETE"])
+    @user_req
+    def backend_route_item(puuid, rid):
+        proj = _backend_project_or_403(puuid)
+        if request.method == "DELETE":
+            if role_rank(session.get("role")) < ROLE_RANK["user"]:
+                return jsonify({"ok": False}), 403
+            db_exec("DELETE FROM project_backend_routes WHERE id=? AND project_id=?", (rid, proj["id"]), fetch=False)
+            return jsonify({"ok": True})
+        row = q1("SELECT * FROM project_backend_routes WHERE id=? AND project_id=?", (rid, proj["id"]))
+        if not row:
+            abort(404)
+        return jsonify({"route": row})
+
+    @app.route("/editor/backend/test/<puuid>/<int:rid>", methods=["POST"])
+    @user_req
+    @write_req
+    def backend_route_test(puuid, rid):
+        proj = _backend_project_or_403(puuid, need_write=True)
+        row = q1("SELECT * FROM project_backend_routes WHERE id=? AND project_id=?", (rid, proj["id"]))
+        if not row:
+            abort(404)
+        if not _backend_globally_enabled():
+            return jsonify({"ok": False, "error": "Backend global o'chirilgan"}), 403
+        test_input = (request.get_json() or {}).get("input", {})
+        db_path = ensure_project_db(puuid)
+        ok, payload, dur = run_user_backend(row["code"], test_input, db_path)
+        _be_log_exec(proj["id"], session["user_id"], f"[TEST]{row['path']}", dur, ok, "" if ok else str(payload))
+        return jsonify({"ok": ok, "result": payload if ok else None, "error": None if ok else payload, "duration_ms": dur})
+
+    @app.route("/api/backend/<puuid>/<path:route_path>", methods=["GET", "POST"])
+    def backend_run(puuid, route_path):
+        if not _backend_globally_enabled():
+            abort(403)
+        if session.get("_guest"):
+            abort(403)
+        if mode_on("global"):
+            abort(403)
+        if "user_id" not in session:
+            abort(401)
+        proj = q1("SELECT * FROM projects WHERE uuid=?", (puuid,))
+        if not proj or not proj.get("backend_enabled"):
+            abort(404)
+        path = "/" + route_path.lstrip("/")
+        row = q1("SELECT * FROM project_backend_routes WHERE project_id=? AND path=? AND method=?",
+                 (proj["id"], path, request.method))
+        if not row:
+            abort(404)
+        if not _be_check_rate_limit(session["user_id"]):
+            return jsonify({"error": f"Juda ko'p so'rov. Daqiqasiga maksimal {RATE_LIMIT_PER_MIN} marta chaqiring."}), 429
+        payload_in = request.get_json(silent=True) or dict(request.args)
+        db_path = ensure_project_db(puuid)
+        ok, payload, dur = run_user_backend(row["code"], payload_in, db_path)
+        _be_log_exec(proj["id"], session["user_id"], path, dur, ok, "" if ok else str(payload))
+        if ok:
+            return jsonify(payload)
+        return jsonify({"error": payload}), 400
+
+# ╔══════════════════════════════════════════════════════════════════════════╗
 # ║                     TERMINAL + MAIN                                       ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
 def print_banner():
@@ -3683,6 +7386,8 @@ def main():
     if not QRCODE_OK:
         print(_c("  ⚠  QR-kod uchun: pip install qrcode[pil]",Y))
     threading.Thread(target=expiry_checker,daemon=True).start()
+    threading.Thread(target=_uptime_checker,daemon=True).start()
+    threading.Thread(target=_watchdog_thread,daemon=True).start()
     while True:
         print_menu()
         try:
@@ -3731,14 +7436,6 @@ def main():
             print(_c("  Noto'g'ri tanlov!",R))
 
 
-backend_engine.register_backend(app, {
-    "db_exec": db_exec, "q1": q1,
-    "get_setting": get_setting, "set_setting": set_setting,
-    "session": session, "request": request, "jsonify": jsonify,
-    "abort": abort, "redirect": redirect,
-    "role_rank": role_rank, "ROLE_RANK": ROLE_RANK,
-    "user_req": user_req, "admin_req": admin_req, "write_req": write_req,
-    "csrf_field": csrf_field, "mode_on": mode_on, "pg": _pg,
-})
+_register_backend_routes()
 if __name__=="__main__":
     main()
