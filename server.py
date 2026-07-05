@@ -3447,17 +3447,19 @@ function openComponentsPanel(){
   document.getElementById('compBg').style.display='flex';
   authFetch('/api/components').then(function(r){return r.json();}).then(function(d){
     var list=document.getElementById('compList');
-    list.innerHTML=(d.components||[]).map(function(c){
-      return '<div class="modalRow" style="flex-direction:column;align-items:flex-start"><div class="fl" style="width:100%"><b style="color:#fff;font-size:.82rem">'+c.name+'</b><span class="bx xp mla">'+c.category+'</span><button class="btn bp bsm" onclick="insertComponent('+JSON.stringify(JSON.stringify(c.code))+')">+ Qo\\'shish</button></div></div>';
+    window._compData=d.components||[];
+    list.innerHTML=window._compData.map(function(c,i){
+      return '<div class="modalRow" style="flex-direction:column;align-items:flex-start"><div class="fl" style="width:100%"><b style="color:#fff;font-size:.82rem">'+c.name+'</b><span class="bx xp mla">'+c.category+'</span><button class="btn bp bsm" onclick="insertComponent('+i+')">+ Ulash</button></div></div>';
     }).join('');
   });
 }
-function insertComponent(code){
-  if(!cm||!activePath) return;
+function insertComponent(idx){
+  if(!cm||!activePath||!window._compData||!window._compData[idx]) return;
+  var code=window._compData[idx].code;
   var cur=cm.getCursor();
-  cm.replaceRange(JSON.parse(code)+'\\n',cur);
+  cm.replaceRange(code+'\\n',cur);
   closeModal('compBg');
-  flash('✓ Komponent qo\\'shildi','gr');
+  flash('✓ Komponent ulandi','gr');
   scheduleRun();
 }
 document.addEventListener('DOMContentLoaded',function(){document.getElementById('compBg').addEventListener('click',function(e){if(e.target.id==='compBg')closeModal('compBg');});});
