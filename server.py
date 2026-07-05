@@ -377,6 +377,16 @@ def setup_db():
             status TEXT DEFAULT 'up',
             response_ms INTEGER,
             checked_at TEXT DEFAULT (datetime('now')))""",
+
+        # Ichki xabar tizimi
+        """CREATE TABLE IF NOT EXISTS internal_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sender_id INTEGER NOT NULL,
+            receiver_id INTEGER NOT NULL,
+            subject TEXT,
+            body TEXT,
+            is_read INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now')))""",
     ]
     _setup_backend_tables()
     for s in stmts:
@@ -848,6 +858,7 @@ def _pg(title, body, act="dash", flash=None, ftype="ok"):
         {_nav('/admin/restarts','🔄 Restart','restarts'==act)}
         {_nav('/admin/analytics','📈 Analitika','analytics'==act)}
         {_nav('/admin/resources','📊 Resurslar','resources'==act)}
+        {_nav('/admin/ab-test','🧪 A/B Test','abtest'==act)}
         {_nav('/admin/ip-whitelist','🔒 IP Whitelist','ipwl'==act)}
         {_nav('/admin/domains','🌐 Domenlar','domains'==act)}
         {_nav('/admin/settings','⚙️ Sozlamalar','settings'==act)}"""
@@ -874,6 +885,7 @@ def _pg(title, body, act="dash", flash=None, ftype="ok"):
     <a href="#" onclick="toggleAIWindow();return false;" class="{'act' if act=='ai' else ''}">🤖 AI Yordamchi</a>
     <div class="sep">Hisobot</div>
     {_nav('/stats','📈 Statistika','stats'==act)}
+    {_nav('/messages','💬 Xabarlar','messages'==act)}
     {adm_nav}
     <div class="sep">Hisob</div>
     {_nav('/profile',f'👤 {uname}','profile'==act)}
@@ -3554,6 +3566,56 @@ document.addEventListener('DOMContentLoaded',function(){
 });
 
 /* ══════════════════════════════════════════════════════════════════════
+   CLIPBOARD PASTE (Ctrl+V rasm)
+   ══════════════════════════════════════════════════════════════════════ */
+document.addEventListener('DOMContentLoaded',function(){
+  document.addEventListener('paste',function(e){
+    var items=e.clipboardData&&e.clipboardData.items;
+    if(!items) return;
+    for(var i=0;i<items.length;i++){
+      if(items[i].type.indexOf('image')!==-1){
+        e.preventDefault();
+        var file=items[i].getAsFile();
+        var fd=new FormData();fd.append('image',file);
+        authFetch('/editor/paste-image/UUID',{method:'POST',body:fd}).then(function(r){return r.json();}).then(function(d){
+          if(d.ok&&cm&&activePath){
+            cm.replaceRange('<img src="'+d.url+'" alt="paste">\\n',cm.getCursor());
+            flash('✓ Rasm clipboard dan qo\\'shildi','gr');
+            scheduleRun();
+          }
+        });
+        break;
+      }
+    }
+  });
+});
+
+/* ══════════════════════════════════════════════════════════════════════
+   LIVE COLLABORATION (polling)
+   ══════════════════════════════════════════════════════════════════════ */
+var _collabTime=0,_collabInterval=null;
+function startCollab(){
+  if(_collabInterval) return;
+  _collabInterval=setInterval(function(){
+    authFetch('/api/collab/UUID/poll?since='+_collabTime).then(function(r){return r.json();}).then(function(d){
+      _collabTime=d.server_time||_collabTime;
+      (d.updates||[]).forEach(function(u){
+        if(u.path===activePath&&docsCache[u.path]){
+          // Boshqa foydalanuvchi o'zgartirgan — yangilash
+          flash('🤝 '+u.user+' fayl yangiladi: '+u.path,'ac');
+        }
+      });
+    });
+    // Faol foydalanuvchilarni ko'rsatish
+    authFetch('/api/collab/UUID/users').then(function(r){return r.json();}).then(function(d){
+      var ps=document.getElementById('ps');
+      if(ps&&d.count>1) ps.textContent='🤝 '+d.count+' ta foydalanuvchi';
+    });
+  },5000);
+}
+document.addEventListener('DOMContentLoaded',function(){setTimeout(startCollab,2000);});
+
+/* ══════════════════════════════════════════════════════════════════════
    BACKEND ROUTE'LAR (loyiha ichidagi mini-serverless funksiyalar)
    ══════════════════════════════════════════════════════════════════════ */
 var beRoutes = [];
@@ -3710,6 +3772,7 @@ def projects_list():
           <div class="fl">
             <a href="/editor/{p['uuid']}" class="btn bp bsm">✏️ Tahrirlash</a>
             <a href="/preview/{p['uuid']}" class="btn bgh bsm" target="_blank">👁 Ko'rish</a>
+            <a href="/responsive/{p['uuid']}" class="btn bgh bsm" target="_blank">🎯 Responsive</a>
             <a href="/projects/share/{p['uuid']}" class="btn bg bsm">🔗 Share</a>
             <a href="/share-folder/{p['uuid']}" class="btn bgh bsm" target="_blank">📂 Papka</a>
             <a href="/projects/{p['uuid']}/team" class="btn bgh bsm">🧑‍🤝‍🧑 Jamoa</a>
@@ -6615,6 +6678,286 @@ def _check_resource_limit():
     except:
         pass
     return None
+
+
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║  3-BOSQICH: Live Collaboration, WebSocket(SSE), Screenshot,             ║
+# ║  Responsive tester, Ichki xabar, A/B testing, Clipboard paste           ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+
+# ── 1. Live Collaboration (SSE orqali real-time sinxronlash) ──────────────
+_collab_updates = {}  # {project_uuid: [{"user","path","content","time"}, ...]}
+
+@app.route("/api/collab/<puuid>/update", methods=["POST"])
+@user_req
+def collab_update(puuid):
+    """Foydalanuvchi faylni o'zgartirganini boshqalarga xabar qiladi."""
+    d = request.get_json() or {}
+    path = d.get("path", "")
+    content = d.get("content", "")
+    username = session.get("username", "")
+    if puuid not in _collab_updates:
+        _collab_updates[puuid] = []
+    _collab_updates[puuid].append({
+        "user": username, "path": path,
+        "content": content[:10000],
+        "time": time.time()
+    })
+    # Faqat oxirgi 20 ta yangilanishni saqlash
+    _collab_updates[puuid] = _collab_updates[puuid][-20:]
+    return jsonify({"ok": True})
+
+@app.route("/api/collab/<puuid>/poll")
+@user_req
+def collab_poll(puuid):
+    """Boshqa foydalanuvchilarning yangilanishlarini olish (polling)."""
+    since = float(request.args.get("since", 0))
+    username = session.get("username", "")
+    updates = []
+    for u in _collab_updates.get(puuid, []):
+        if u["time"] > since and u["user"] != username:
+            updates.append(u)
+    return jsonify({"updates": updates, "server_time": time.time()})
+
+@app.route("/api/collab/<puuid>/users")
+@user_req
+def collab_users(puuid):
+    """Hozir loyihada kim ishlayotganini ko'rsatadi."""
+    # So'nggi 30 sekund ichida yangilanish yuborgan foydalanuvchilar
+    cutoff = time.time() - 30
+    active = set()
+    for u in _collab_updates.get(puuid, []):
+        if u["time"] > cutoff:
+            active.add(u["user"])
+    active.add(session.get("username", ""))
+    return jsonify({"users": list(active), "count": len(active)})
+
+
+
+# ── 2. Responsive tester (har xil ekran o'lchamlari) ─────────────────────
+@app.route("/responsive/<puuid>")
+@user_req
+def responsive_tester(puuid):
+    """Loyihani turli ekran o'lchamlarida ko'rish."""
+    proj = q1("SELECT * FROM projects WHERE uuid=?", (puuid,))
+    if not proj:
+        abort(404)
+    import html as hm
+    devices = [
+        ("iPhone SE", 375, 667),
+        ("iPhone 14", 390, 844),
+        ("iPhone 14 Pro Max", 430, 932),
+        ("iPad Mini", 768, 1024),
+        ("iPad Pro", 1024, 1366),
+        ("MacBook Air", 1280, 800),
+        ("Desktop HD", 1920, 1080),
+    ]
+    btns = "".join(f'<button onclick="setSize({w},{h})" class="btn bgh bsm">{name} ({w}x{h})</button>' for name, w, h in devices)
+    site_title = get_setting("site_title", "SrvManager")
+    return f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Responsive — {hm.escape(proj['name'])}</title><style>{CSS}</style></head>
+    <body style="margin:0;display:flex;flex-direction:column;height:100vh">
+    <div style="padding:10px 14px;background:var(--surf);border-bottom:1px solid var(--brd);display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+      <b style="color:#fff;font-size:.85rem">🎯 {hm.escape(proj['name'])}</b>
+      {btns}
+      <span class="tm mla" id="sizeLabel" style="font-size:.75rem">—</span>
+      <a href="/editor/{puuid}" class="btn bgh bsm">← Muharrir</a>
+    </div>
+    <div style="flex:1;display:flex;align-items:center;justify-content:center;background:#05060a;overflow:auto;padding:20px">
+      <iframe id="respFrame" src="/preview/{puuid}" style="border:10px solid #2b2f3a;border-radius:16px;background:#fff;transition:.3s;width:375px;height:667px"></iframe>
+    </div>
+    <script>
+    function setSize(w,h){{
+      var f=document.getElementById('respFrame');
+      f.style.width=w+'px';f.style.height=h+'px';
+      document.getElementById('sizeLabel').textContent=w+'x'+h;
+    }}
+    setSize(375,667);
+    </script></body></html>"""
+
+
+
+# ── 3. Screenshot (loyiha preview rasmini saqlash) ────────────────────────
+@app.route("/api/screenshot/<puuid>", methods=["POST"])
+@user_req
+def api_screenshot(puuid):
+    """Loyiha preview ni rasm sifatida saqlash uchun ma'lumot qaytaradi.
+    Frontend tomonida html2canvas ishlatiladi."""
+    proj = q1("SELECT name FROM projects WHERE uuid=?", (puuid,))
+    if not proj:
+        return jsonify({"ok": False}), 404
+    # Frontend tomonida html2canvas bilan screenshot olinadi
+    return jsonify({"ok": True, "preview_url": f"/preview/{puuid}",
+                    "filename": f"screenshot_{proj['name']}.png"})
+
+
+
+# ── 4. Ichki xabar tizimi ─────────────────────────────────────────────────
+@app.route("/messages", methods=["GET"])
+@user_req
+def messages_inbox():
+    """Foydalanuvchining xabarlari."""
+    uid = session["user_id"]
+    msgs = db_exec("""SELECT m.*,u.username as sender_name FROM internal_messages m
+                      JOIN users u ON m.sender_id=u.id
+                      WHERE m.receiver_id=? ORDER BY m.id DESC LIMIT 50""", (uid,)) or []
+    rows = "".join(f"""<tr style="{'background:rgba(124,111,255,.05)' if not m['is_read'] else ''}">
+      <td><b style="color:{'#fff' if not m['is_read'] else 'var(--mt)'}">{m['sender_name']}</b></td>
+      <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis">{m['subject'] or '(mavzu yoq)'}</td>
+      <td class="tm" style="font-size:.74rem">{str(m['created_at'])[:16]}</td>
+      <td><a href="/messages/{m['id']}" class="btn bgh bsm">📖</a>
+        <form method="POST" action="/messages/delete/{m['id']}" style="display:inline">{csrf_field()}
+          <button class="btn br bsm">🗑</button></form></td>
+    </tr>""" for m in msgs)
+    unread = sum(1 for m in msgs if not m["is_read"])
+    body = f"""
+    <div class="fl mb"><h2 style="color:#fff">💬 Xabarlar</h2>
+      <span class="bx xp mla">{unread} yangi</span>
+      <a href="/messages/new" class="btn bp bsm">✉ Yangi xabar</a></div>
+    <div class="card" style="padding:0"><div class="tw">
+      <table><thead><tr><th>Kimdan</th><th>Mavzu</th><th>Vaqt</th><th>Amal</th></tr></thead>
+      <tbody>{rows or '<tr><td colspan=4 style="text-align:center;color:var(--mt);padding:16px">Xabar yoq</td></tr>'}</tbody></table>
+    </div></div>"""
+    return _pg("Xabarlar", body, "messages")
+
+@app.route("/messages/new", methods=["GET", "POST"])
+@user_req
+def messages_new():
+    if request.method == "POST":
+        to_user = request.form.get("to", "").strip()
+        subject = request.form.get("subject", "").strip()[:200]
+        body_text = request.form.get("body", "").strip()[:2000]
+        receiver = q1("SELECT id FROM users WHERE username=?", (to_user,))
+        if not receiver:
+            return _pg("Yangi xabar", '<div class="al al-er">Foydalanuvchi topilmadi</div>', "messages")
+        db_exec("INSERT INTO internal_messages (sender_id,receiver_id,subject,body) VALUES (?,?,?,?)",
+                (session["user_id"], receiver["id"], subject, body_text), fetch=False)
+        return redirect("/messages")
+    form = f"""<div class="card" style="max-width:500px"><h3>✉ Yangi xabar</h3>
+      <form method="POST">{csrf_field()}
+        <div class="fld"><label>Kimga (username)</label><input name="to" required></div>
+        <div class="fld"><label>Mavzu</label><input name="subject"></div>
+        <div class="fld"><label>Xabar</label><textarea name="body" required></textarea></div>
+        <button class="btn bp">📨 Yuborish</button>
+        <a href="/messages" class="btn bgh" style="margin-left:8px">Bekor</a>
+      </form></div>"""
+    return _pg("Yangi xabar", form, "messages")
+
+@app.route("/messages/<int:mid>")
+@user_req
+def messages_read(mid):
+    msg = q1("SELECT m.*,u.username as sender_name FROM internal_messages m JOIN users u ON m.sender_id=u.id WHERE m.id=? AND m.receiver_id=?",
+             (mid, session["user_id"]))
+    if not msg:
+        abort(404)
+    if not msg["is_read"]:
+        db_exec("UPDATE internal_messages SET is_read=1 WHERE id=?", (mid,), fetch=False)
+    body = f"""<div class="card" style="max-width:600px">
+      <div class="fl mb"><b style="color:#fff">{msg['subject'] or '(mavzu yoq)'}</b>
+        <span class="tm mla">{str(msg['created_at'])[:16]}</span></div>
+      <p class="tm mb" style="font-size:.8rem">Kimdan: <b style="color:var(--ac)">{msg['sender_name']}</b></p>
+      <div style="background:var(--bg);border-radius:8px;padding:14px;color:var(--tx);font-size:.85rem;white-space:pre-wrap">{msg['body']}</div>
+      <a href="/messages" class="btn bgh mt">← Xabarlar</a>
+    </div>"""
+    return _pg("Xabar", body, "messages")
+
+@app.route("/messages/delete/<int:mid>", methods=["POST"])
+@user_req
+def messages_delete(mid):
+    db_exec("DELETE FROM internal_messages WHERE id=? AND receiver_id=?", (mid, session["user_id"]), fetch=False)
+    return redirect("/messages")
+
+
+
+# ── 5. A/B Testing ────────────────────────────────────────────────────────
+@app.route("/admin/ab-test", methods=["GET", "POST"])
+@admin_req
+def admin_ab_test():
+    """A/B test yaratish va natijalarni ko'rish."""
+    if request.method == "POST":
+        name = request.form.get("name", "").strip()
+        variant_a = request.form.get("variant_a", "").strip()
+        variant_b = request.form.get("variant_b", "").strip()
+        if name:
+            set_setting(f"ab_{name}_a", variant_a)
+            set_setting(f"ab_{name}_b", variant_b)
+            set_setting(f"ab_{name}_hits_a", "0")
+            set_setting(f"ab_{name}_hits_b", "0")
+            set_setting(f"ab_{name}_active", "1")
+    # Barcha testlar
+    all_settings = db_exec("SELECT key,value FROM app_settings WHERE key LIKE 'ab_%_active'") or []
+    tests_html = ""
+    for s in all_settings:
+        name = s["key"].replace("ab_", "").replace("_active", "")
+        hits_a = get_setting(f"ab_{name}_hits_a", "0")
+        hits_b = get_setting(f"ab_{name}_hits_b", "0")
+        active = s["value"] == "1"
+        tests_html += f"""<tr><td><b style="color:#fff">{name}</b></td>
+          <td>A: {hits_a}</td><td>B: {hits_b}</td>
+          <td><span class="bx {'xg' if active else 'xr'}">{'Faol' if active else 'Tugagan'}</span></td>
+          <td><form method="POST" action="/admin/ab-test/toggle/{name}">{csrf_field()}
+            <button class="btn bgh bsm">{'⏸' if active else '▶️'}</button></form></td></tr>"""
+    body = f"""
+    <h2 style="color:#fff;margin-bottom:14px">🧪 A/B Testing</h2>
+    <div class="card"><h3>Yangi test yaratish</h3>
+      <form method="POST">{csrf_field()}
+        <div class="g g3">
+          <div class="fld"><label>Test nomi</label><input name="name" required placeholder="masalan: button_color"></div>
+          <div class="fld"><label>Variant A</label><input name="variant_a" placeholder="masalan: #7c6fff"></div>
+          <div class="fld"><label>Variant B</label><input name="variant_b" placeholder="masalan: #22d3a0"></div>
+        </div>
+        <button class="btn bp">+ Yaratish</button>
+      </form>
+    </div>
+    <div class="card mt"><h3>Mavjud testlar</h3>
+      <div class="tw"><table><thead><tr><th>Nomi</th><th>A</th><th>B</th><th>Holat</th><th>Amal</th></tr></thead>
+      <tbody>{tests_html or '<tr><td colspan=5 style="text-align:center;color:var(--mt);padding:14px">Test yoq</td></tr>'}</tbody></table></div>
+    </div>"""
+    return _pg("A/B Testing", body, "abtest")
+
+@app.route("/admin/ab-test/toggle/<name>", methods=["POST"])
+@admin_req
+def admin_ab_toggle(name):
+    cur = get_setting(f"ab_{name}_active", "0")
+    set_setting(f"ab_{name}_active", "0" if cur == "1" else "1")
+    return redirect("/admin/ab-test")
+
+@app.route("/api/ab/<name>")
+def api_ab_variant(name):
+    """A/B test uchun variant qaytaradi (tasodifiy A yoki B)."""
+    import random
+    active = get_setting(f"ab_{name}_active", "0")
+    if active != "1":
+        return jsonify({"variant": "a", "value": get_setting(f"ab_{name}_a", "")})
+    variant = random.choice(["a", "b"])
+    value = get_setting(f"ab_{name}_{variant}", "")
+    # Hit hisoblash
+    key = f"ab_{name}_hits_{variant}"
+    hits = int(get_setting(key, "0")) + 1
+    set_setting(key, str(hits))
+    return jsonify({"variant": variant, "value": value})
+
+
+
+# ── 6. Clipboard paste (Ctrl+V rasm yuklash) ──────────────────────────────
+@app.route("/editor/paste-image/<puuid>", methods=["POST"])
+@user_req
+@write_req
+def editor_paste_image(puuid):
+    """Ctrl+V bilan clipboard dan rasm yuklash."""
+    proj = q1("SELECT id FROM projects WHERE uuid=?", (puuid,))
+    if not proj:
+        return jsonify({"ok": False}), 404
+    f = request.files.get("image")
+    if not f:
+        return jsonify({"ok": False, "error": "Rasm topilmadi"})
+    import uuid as _uuid
+    stored = f"paste_{_uuid.uuid4().hex[:8]}.png"
+    dest = FILES_PATH / stored
+    f.save(str(dest))
+    url = f"/uploads/files/{stored}"
+    return jsonify({"ok": True, "url": url})
 
 
 # ╔══════════════════════════════════════════════════════════════════════════╗
