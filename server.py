@@ -6764,20 +6764,26 @@ def admin_resources():
 @admin_req
 def admin_resources_save():
     cpu = request.form.get("cpu_limit", "90")
-    ram = request.form.get("ram_limit", "85")
+    ram = request.form.get("ram_limit", "95")
+    enabled = "1" if request.form.get("enabled") else "0"
     set_setting("cpu_limit", cpu)
     set_setting("ram_limit", ram)
+    set_setting("resource_limit_enabled", enabled)
     return redirect("/admin/resources")
 
 @app.before_request
 def _check_resource_limit():
-    """Resurs chegarasiga yetganda so'rovlarni rad etish."""
+    """Resurs chegarasiga yetganda so'rovlarni rad etish (faqat admin yoqsa)."""
     if not PSUTIL_OK:
         return None
-    if request.path.startswith("/admin") or request.path in ("/login", "/logout", "/status"):
+    # Faqat admin sozlamalarda yoqilgan bo'lsa ishlaydi
+    if get_setting("resource_limit_enabled", "0") != "1":
         return None
-    cpu_limit = int(get_setting("cpu_limit", "90"))
-    ram_limit = int(get_setting("ram_limit", "85"))
+    if request.path.startswith("/admin") or request.path in ("/login", "/logout", "/status", "/api"):
+        return None
+    if session.get("admin"):
+        return None
+    ram_limit = int(get_setting("ram_limit", "95"))
     try:
         mem = psutil.virtual_memory()
         if mem.percent > ram_limit:
