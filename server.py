@@ -638,6 +638,10 @@ def finalize_login(user, ip):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     db_exec("UPDATE users SET last_login=? WHERE id=?", (now, user["id"]), fetch=False)
     telegram_send(f"✅ Yangi kirish\nFoydalanuvchi: {user['username']}\nIP: {ip}")
+    try:
+        _check_new_device(user, ip)
+    except Exception:
+        pass
 
 # ── Sozlamalar (key-value) ────────────────────────────────
 def get_setting(key, default=""):
@@ -842,6 +846,8 @@ def _pg(title, body, act="dash", flash=None, ftype="ok"):
         {_nav('/admin/audit','📝 Audit','audit'==act)}
         {_nav('/admin/sessions','🔐 Sessiyalar','sessions'==act)}
         {_nav('/admin/restarts','🔄 Restart','restarts'==act)}
+        {_nav('/admin/analytics','📈 Analitika','analytics'==act)}
+        {_nav('/admin/resources','📊 Resurslar','resources'==act)}
         {_nav('/admin/ip-whitelist','🔒 IP Whitelist','ipwl'==act)}
         {_nav('/admin/domains','🌐 Domenlar','domains'==act)}
         {_nav('/admin/settings','⚙️ Sozlamalar','settings'==act)}"""
@@ -1757,6 +1763,7 @@ def files_list():
           <td>{pub}</td><td>{f['download_count']}</td><td>{exp}</td>
           <td>{f.get('username') or '—'}</td>
           <td class="fl">
+            <a href="/preview-file/{f['uuid']}" class="btn bgh bsm" target="_blank">👁</a>
             <a href="/download/{f['uuid']}" class="btn bg bsm">⬇ Olish</a>
             <form method="POST" action="/files/delete/{f['uuid']}" onsubmit="return confirm('O\\'chirish?')">{csrf_field()}
               <button class="btn br bsm">🗑</button></form>
@@ -3704,6 +3711,7 @@ def projects_list():
             <a href="/editor/{p['uuid']}" class="btn bp bsm">✏️ Tahrirlash</a>
             <a href="/preview/{p['uuid']}" class="btn bgh bsm" target="_blank">👁 Ko'rish</a>
             <a href="/projects/share/{p['uuid']}" class="btn bg bsm">🔗 Share</a>
+            <a href="/share-folder/{p['uuid']}" class="btn bgh bsm" target="_blank">📂 Papka</a>
             <a href="/projects/{p['uuid']}/team" class="btn bgh bsm">🧑‍🤝‍🧑 Jamoa</a>
             <a href="/projects/download/{p['uuid']}" class="btn bgh bsm">⬇ ZIP</a>
             <button class="btn bgh bsm" onclick="showLoc('{p['uuid']}')">📍 Manzil</button>
@@ -6282,6 +6290,331 @@ def api_theme():
         theme = "dark"
     set_setting(f"theme_{session.get('user_id',0)}", theme)
     return jsonify({"ok": True, "theme": theme})
+
+
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║  2-BOSQICH: GeoIP, Analitika, Honeypot, Login bildirishnoma,           ║
+# ║             Fayl preview, Papka sharing, Profil, Resource limiter        ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+
+# ── 1. GeoIP (oddiy IP-lokatsiya) ─────────────────────────────────────────
+_GEOIP_CACHE = {}
+
+def _get_geo_info(ip):
+    """IP manzildan taxminiy joylashuvni aniqlash (tashqi API siz, oddiy subnet asosida)."""
+    if ip in _GEOIP_CACHE:
+        return _GEOIP_CACHE[ip]
+    info = {"country": "Noaniq", "city": "Noaniq", "flag": "🌍"}
+    # Mahalliy IP lar
+    if ip.startswith("127.") or ip.startswith("192.168.") or ip.startswith("10.") or ip == "localhost":
+        info = {"country": "Mahalliy", "city": "LAN", "flag": "🏠"}
+    elif ip.startswith("172."):
+        info = {"country": "Mahalliy", "city": "Private", "flag": "🏠"}
+    else:
+        # Oddiy geo API (agar internet bo'lsa)
+        try:
+            import urllib.request as ur
+            resp = ur.urlopen(f"http://ip-api.com/json/{ip}?fields=country,city,countryCode", timeout=3)
+            data = json.loads(resp.read().decode())
+            if data.get("country"):
+                flags = {"UZ": "🇺🇿", "RU": "🇷🇺", "US": "🇺🇸", "GB": "🇬🇧", "DE": "🇩🇪",
+                         "TR": "🇹🇷", "KZ": "🇰🇿", "KR": "🇰🇷", "JP": "🇯🇵", "CN": "🇨🇳"}
+                cc = data.get("countryCode", "")
+                info = {"country": data.get("country", "?"), "city": data.get("city", "?"),
+                        "flag": flags.get(cc, "🌍")}
+        except Exception:
+            pass
+    _GEOIP_CACHE[ip] = info
+    if len(_GEOIP_CACHE) > 500:
+        _GEOIP_CACHE.clear()
+    return info
+
+
+
+# ── 2. Batafsil analitika (statistika sahifasiga qo'shiladi) ──────────────
+@app.route("/admin/analytics")
+@admin_req
+def admin_analytics():
+    """Batafsil analitika: qurilma, brauzer, sahifa, vaqt."""
+    # Top sahifalar
+    top_pages = db_exec("SELECT path,COUNT(*) cnt FROM access_logs GROUP BY path ORDER BY cnt DESC LIMIT 15") or []
+    # Top IP + geo
+    top_ips = db_exec("SELECT ip_address,COUNT(*) cnt FROM access_logs GROUP BY ip_address ORDER BY cnt DESC LIMIT 15") or []
+    # Soatlik taqsimot
+    hourly = db_exec("SELECT strftime('%H',visited_at) as hour,COUNT(*) cnt FROM access_logs WHERE visited_at>datetime('now','-7 days') GROUP BY hour ORDER BY hour") or []
+    # Brauzer/qurilma
+    agents = db_exec("SELECT user_agent,COUNT(*) cnt FROM access_logs WHERE user_agent!='' GROUP BY user_agent ORDER BY cnt DESC LIMIT 10") or []
+
+    pages_html = "".join(f"<tr><td style='max-width:250px;overflow:hidden;text-overflow:ellipsis;font-size:.76rem'><code>{p['path']}</code></td><td><b>{p['cnt']}</b></td></tr>" for p in top_pages)
+    ips_html = ""
+    for ip_row in top_ips:
+        geo = _get_geo_info(ip_row["ip_address"])
+        ips_html += f"<tr><td><code style='font-size:.74rem'>{ip_row['ip_address']}</code></td><td>{geo['flag']} {geo['country']}, {geo['city']}</td><td><b>{ip_row['cnt']}</b></td></tr>"
+
+    hourly_labels = json.dumps([h["hour"] + ":00" for h in hourly])
+    hourly_data = json.dumps([h["cnt"] for h in hourly])
+
+    devices = {"Mobile": 0, "Desktop": 0, "Bot": 0}
+    for a in agents:
+        ua = (a.get("user_agent") or "").lower()
+        if "bot" in ua or "crawler" in ua or "spider" in ua:
+            devices["Bot"] += a["cnt"]
+        elif "mobile" in ua or "android" in ua or "iphone" in ua:
+            devices["Mobile"] += a["cnt"]
+        else:
+            devices["Desktop"] += a["cnt"]
+
+    body = f"""
+    <h2 style="color:#fff;margin-bottom:14px">📈 Batafsil analitika</h2>
+    <div class="g g3 mb">
+      <div class="stat"><div class="v">{devices['Desktop']}</div><div class="l">🖥 Desktop</div></div>
+      <div class="stat"><div class="v">{devices['Mobile']}</div><div class="l">📱 Mobile</div></div>
+      <div class="stat"><div class="v">{devices['Bot']}</div><div class="l">🤖 Bot</div></div>
+    </div>
+    <div class="g g2">
+      <div class="card"><h3>🏆 Top sahifalar</h3>
+        <div class="tw"><table><thead><tr><th>Sahifa</th><th>Tashriflar</th></tr></thead>
+        <tbody>{pages_html or '<tr><td colspan=2 class="tm" style="text-align:center;padding:14px">Malumot yoq</td></tr>'}</tbody></table></div></div>
+      <div class="card"><h3>🗺️ Top IP / GeoIP</h3>
+        <div class="tw"><table><thead><tr><th>IP</th><th>Joylashuv</th><th>Soni</th></tr></thead>
+        <tbody>{ips_html or '<tr><td colspan=3 class="tm" style="text-align:center;padding:14px">Malumot yoq</td></tr>'}</tbody></table></div></div>
+    </div>
+    <div class="card mt"><h3>⏰ Soatlik tashriflar (7 kun)</h3>
+      <canvas id="hourlyChart" height="180"></canvas>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script>
+    new Chart(document.getElementById('hourlyChart'),{{type:'bar',
+      data:{{labels:{hourly_labels},datasets:[{{label:'Tashriflar',data:{hourly_data},
+        backgroundColor:'rgba(124,111,255,.3)',borderColor:'#7c6fff',borderWidth:1}}]}},
+      options:{{plugins:{{legend:{{display:false}}}},scales:{{
+        x:{{ticks:{{color:'#5c6890'}},grid:{{color:'#252d45'}}}},
+        y:{{ticks:{{color:'#5c6890'}},grid:{{color:'#252d45'}},beginAtZero:true}}}}}}
+    }});
+    </script>"""
+    return _pg("Analitika", body, "analytics")
+
+
+
+# ── 3. Honeypot (bot/xaker tutish) ────────────────────────────────────────
+@app.route("/wp-admin")
+@app.route("/wp-login.php")
+@app.route("/.env")
+@app.route("/admin.php")
+@app.route("/phpmyadmin")
+@app.route("/administrator")
+def honeypot_trap():
+    """Yashirin trap sahifalar — bot/xaker kirsa avtomatik bloklanadi."""
+    ip = get_ip()
+    path = request.path
+    db_exec("INSERT INTO audit_log (user_id,username,action,target_type,target_id,details,ip_address) "
+            "VALUES (NULL,'[HONEYPOT]','honeypot_trigger','trap',?,?,?)",
+            (path, f"Bot/xaker aniqlandi: {path}", ip), fetch=False)
+    # 1 soatga bloklash
+    unblock = (datetime.now() + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+    db_exec("INSERT OR IGNORE INTO blocked_ips (ip_address,reason,unblock_at) VALUES (?,?,?)",
+            (ip, f"Honeypot: {path}", unblock), fetch=False)
+    telegram_send(f"🕵️ Honeypot: {ip} bloklandi\nYol: {path}\nSabab: Bot/xaker harakati")
+    abort(404)
+
+
+
+# ── 4. Login bildirishnoma (yangi qurilma) ────────────────────────────────
+def _check_new_device(user, ip):
+    """Agar foydalanuvchi yangi IP dan kirsa — Telegram xabar yuboradi."""
+    last_ips = db_exec("SELECT DISTINCT ip_address FROM access_logs WHERE path='/login' "
+                       "AND ip_address!=? ORDER BY visited_at DESC LIMIT 10", (ip,)) or []
+    known_ips = {r["ip_address"] for r in last_ips}
+    # Agar bu IP avval ko'rilmagan bo'lsa
+    if ip not in known_ips and known_ips:
+        geo = _get_geo_info(ip)
+        telegram_send(f"⚠️ Yangi qurilma/IP dan kirish!\n"
+                      f"Foydalanuvchi: {user['username']}\n"
+                      f"IP: {ip}\n"
+                      f"Joylashuv: {geo['flag']} {geo['country']}, {geo['city']}\n"
+                      f"Vaqt: {datetime.now().strftime('%H:%M %d.%m.%Y')}")
+
+
+
+# ── 5. Fayl preview (PDF, video, audio, rasm) ─────────────────────────────
+@app.route("/preview-file/<fuid>")
+def file_preview(fuid):
+    """Faylni brauzerda ko'rish (PDF, video, audio, rasm)."""
+    row = q1("SELECT * FROM files WHERE uuid=?", (fuid,))
+    if not row:
+        abort(404)
+    if not row["is_public"] and session.get("user_id") != row["owner_id"] and not session.get("admin"):
+        return redirect("/login")
+    ext = (row.get("file_type") or "").lower()
+    name = row.get("original_name", "Fayl")
+    url = f"/dl/{fuid}" if row["is_public"] else f"/download/{fuid}"
+
+    if ext in ("png", "jpg", "jpeg", "gif", "svg", "webp", "ico"):
+        content = f'<img src="{url}" style="max-width:100%;max-height:80vh;border-radius:8px">'
+    elif ext in ("mp4", "webm", "ogg"):
+        content = f'<video src="{url}" controls style="max-width:100%;max-height:80vh;border-radius:8px"></video>'
+    elif ext in ("mp3", "wav", "ogg", "m4a"):
+        content = f'<audio src="{url}" controls style="width:100%;margin-top:20px"></audio>'
+    elif ext == "pdf":
+        content = f'<iframe src="{url}" style="width:100%;height:80vh;border:none;border-radius:8px"></iframe>'
+    elif ext in ("txt", "json", "html", "css", "js", "py", "md"):
+        # Matn fayllarni o'qib ko'rsatish
+        dest = FILES_PATH / row["stored_name"]
+        try:
+            text_content = dest.read_text(encoding="utf-8", errors="replace")[:50000]
+            import html as hm
+            content = f'<pre style="background:var(--bg);border:1px solid var(--brd);border-radius:8px;padding:16px;overflow:auto;max-height:80vh;color:var(--tx);font-size:.82rem">{hm.escape(text_content)}</pre>'
+        except:
+            content = '<p class="tm">Fayl o\'qib bo\'lmadi</p>'
+    else:
+        content = f'<p class="tm" style="text-align:center;margin:40px 0">Bu fayl turini preview qilib bo\'lmaydi.<br><a href="{url}" class="btn bp mt">⬇ Yuklab olish</a></p>'
+
+    site_title = get_setting("site_title", "SrvManager")
+    return f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Preview: {name}</title><style>{CSS}</style></head>
+    <body style="display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;padding:20px">
+    <div style="max-width:900px;width:100%">
+      <div class="fl mb"><h2 style="color:#fff">{name}</h2>
+        <a href="{url}" class="btn bg bsm mla">⬇ Yuklab olish</a>
+        <a href="/files" class="btn bgh bsm">← Fayllar</a></div>
+      {content}
+    </div></body></html>"""
+
+
+
+# ── 6. Papka sharing (butun loyihani ulashish) ────────────────────────────
+@app.route("/share-folder/<puuid>")
+def share_folder(puuid):
+    """Loyiha fayllarini ro'yxat ko'rinishida ko'rsatadi (ommaviy havola)."""
+    proj = q1("SELECT * FROM projects WHERE uuid=? AND is_public=1", (puuid,))
+    if not proj:
+        abort(404)
+    files = db_exec("SELECT path,is_folder FROM project_files WHERE project_id=? ORDER BY path", (proj["id"],)) or []
+    import html as hm
+    rows = "".join(f"""<tr>
+      <td>{'📁' if f['is_folder'] else '📄'} {hm.escape(f['path'])}</td>
+    </tr>""" for f in files)
+    site_title = get_setting("site_title", "SrvManager")
+    return f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>{hm.escape(proj['name'])} — Fayllar</title><style>{CSS}</style></head>
+    <body style="padding:30px;max-width:700px;margin:0 auto">
+    <h1 style="color:#fff;margin-bottom:6px">{hm.escape(proj['name'])}</h1>
+    <p class="tm mb">Loyiha fayllari ro'yxati</p>
+    <div class="fl mb">
+      <a href="/preview/{puuid}" class="btn bp bsm">👁 Preview</a>
+      <a href="/projects/download/{puuid}" class="btn bg bsm">⬇ ZIP yuklab olish</a>
+    </div>
+    <div class="card" style="padding:0"><div class="tw">
+      <table><thead><tr><th>Fayl</th></tr></thead>
+      <tbody>{rows or '<tr><td class="tm" style="text-align:center;padding:14px">Fayl yoq</td></tr>'}</tbody></table>
+    </div></div>
+    </body></html>"""
+
+
+
+# ── 7. Foydalanuvchi profili (avatar, bio) ─────────────────────────────────
+@app.route("/profile/update-bio", methods=["POST"])
+@user_req
+def profile_update_bio():
+    """Avatar URL va bio saqlash."""
+    d = request.get_json() or {}
+    avatar = (d.get("avatar") or "").strip()[:500]
+    bio = (d.get("bio") or "").strip()[:500]
+    uid = session["user_id"]
+    set_setting(f"avatar_{uid}", avatar)
+    set_setting(f"bio_{uid}", bio)
+    return jsonify({"ok": True})
+
+@app.route("/u/<username>")
+def public_profile(username):
+    """Foydalanuvchining ommaviy profil sahifasi."""
+    user = q1("SELECT id,username,role,created_at FROM users WHERE username=? AND is_active=1", (username,))
+    if not user:
+        abort(404)
+    avatar = get_setting(f"avatar_{user['id']}", "")
+    bio = get_setting(f"bio_{user['id']}", "")
+    # Foydalanuvchi loyihalari (ommaviy)
+    projs = db_exec("SELECT name,uuid FROM projects WHERE owner_id=? AND is_public=1 ORDER BY updated_at DESC LIMIT 10", (user["id"],)) or []
+    proj_html = "".join(f'<a href="/preview/{p["uuid"]}" class="btn bgh bsm" style="margin:3px">{p["name"]}</a>' for p in projs)
+    import html as hm
+    avatar_html = f'<img src="{hm.escape(avatar)}" style="width:80px;height:80px;border-radius:50%;border:3px solid var(--ac);object-fit:cover">' if avatar else '<div style="width:80px;height:80px;border-radius:50%;background:var(--ac);display:flex;align-items:center;justify-content:center;font-size:2rem;color:#fff">{username[0].upper()}</div>'
+    site_title = get_setting("site_title", "SrvManager")
+    return f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>@{hm.escape(username)} — {site_title}</title><style>{CSS}</style></head>
+    <body style="display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px">
+    <div style="max-width:400px;width:100%;text-align:center">
+      {avatar_html}
+      <h2 style="color:#fff;margin-top:12px">@{hm.escape(username)}</h2>
+      <span class="bx xb">{user['role']}</span>
+      <p class="tm mt" style="font-size:.82rem">{hm.escape(bio) or 'Bio yoq'}</p>
+      <p class="tm" style="font-size:.72rem;margin-top:8px">Qo'shilgan: {str(user['created_at'])[:10]}</p>
+      <div class="mt" style="display:flex;flex-wrap:wrap;justify-content:center;gap:4px">{proj_html or '<span class="tm">Ommaviy loyiha yoq</span>'}</div>
+      <a href="/" class="btn bgh mt" style="margin-top:20px">← Asosiy</a>
+    </div></body></html>"""
+
+
+
+# ── 8. Resource limiter (CPU/RAM cheklash) ─────────────────────────────────
+@app.route("/admin/resources")
+@admin_req
+def admin_resources():
+    """Server resurslarini ko'rish va chegaralarni boshqarish."""
+    cpu_limit = int(get_setting("cpu_limit", "90"))
+    ram_limit = int(get_setting("ram_limit", "85"))
+    body = f"""
+    <h2 style="color:#fff;margin-bottom:14px">📊 Resource Limiter</h2>
+    <div class="card">
+      <p class="tm mb" style="font-size:.79rem">Server resurs chegaralari. Bu chegaraga yetganda yangi so'rovlar rad etiladi.</p>
+      <form method="POST" action="/admin/resources/save">{csrf_field()}
+        <div class="g g2">
+          <div class="fld"><label>CPU limit (%)</label>
+            <input name="cpu_limit" type="number" min="50" max="100" value="{cpu_limit}"></div>
+          <div class="fld"><label>RAM limit (%)</label>
+            <input name="ram_limit" type="number" min="50" max="100" value="{ram_limit}"></div>
+        </div>
+        <button class="btn bp">💾 Saqlash</button>
+      </form>
+    </div>"""
+    if PSUTIL_OK:
+        cpu = psutil.cpu_percent(interval=0.3)
+        mem = psutil.virtual_memory()
+        body += f"""
+    <div class="g g2 mt">
+      <div class="stat"><div class="v" style="color:{'var(--rd)' if cpu>cpu_limit else 'var(--gr)'}">{cpu}%</div>
+        <div class="l">CPU (limit: {cpu_limit}%)</div></div>
+      <div class="stat"><div class="v" style="color:{'var(--rd)' if mem.percent>ram_limit else 'var(--gr)'}">{mem.percent}%</div>
+        <div class="l">RAM (limit: {ram_limit}%)</div></div>
+    </div>"""
+    return _pg("Resource Limiter", body, "resources")
+
+@app.route("/admin/resources/save", methods=["POST"])
+@admin_req
+def admin_resources_save():
+    cpu = request.form.get("cpu_limit", "90")
+    ram = request.form.get("ram_limit", "85")
+    set_setting("cpu_limit", cpu)
+    set_setting("ram_limit", ram)
+    return redirect("/admin/resources")
+
+@app.before_request
+def _check_resource_limit():
+    """Resurs chegarasiga yetganda so'rovlarni rad etish."""
+    if not PSUTIL_OK:
+        return None
+    if request.path.startswith("/admin") or request.path in ("/login", "/logout", "/status"):
+        return None
+    cpu_limit = int(get_setting("cpu_limit", "90"))
+    ram_limit = int(get_setting("ram_limit", "85"))
+    try:
+        mem = psutil.virtual_memory()
+        if mem.percent > ram_limit:
+            return jsonify({"error": "Server haddan tashqari yuklangan. Keyinroq urinib ko'ring."}), 503
+    except:
+        pass
+    return None
 
 
 # ╔══════════════════════════════════════════════════════════════════════════╗
