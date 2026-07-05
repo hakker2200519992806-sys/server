@@ -870,7 +870,7 @@ def _pg(title, body, act="dash", flash=None, ftype="ok"):
 <style>{CSS}</style>
 </head><body>
 <div class="layout">
-<aside class="sb">
+<aside class="sb" id="mainSidebar">
   <div class="logo">⬡ <span>{site_title}</span></div>
   <nav>
     {_nav('/dashboard','🏠 Dashboard','dash'==act)}
@@ -927,6 +927,18 @@ function copyText(t){{navigator.clipboard.writeText(t).then(()=>{{
     r.style.setProperty('--tx',v.tx);r.style.setProperty('--mt',v.mt);}}
 }})();
 function setTheme(t){{localStorage.setItem('srv_theme',t);location.reload();}}
+// Sidebar scroll holatini saqlash va tiklash
+(function(){{
+  var sb=document.getElementById('mainSidebar');
+  if(!sb) return;
+  var saved=sessionStorage.getItem('sb_scroll');
+  if(saved) sb.scrollTop=parseInt(saved);
+  sb.addEventListener('scroll',function(){{sessionStorage.setItem('sb_scroll',sb.scrollTop);}});
+  // Har bir nav link bosilganda scroll saqlanadi
+  sb.querySelectorAll('a[href]').forEach(function(a){{
+    a.addEventListener('click',function(){{sessionStorage.setItem('sb_scroll',sb.scrollTop);}});
+  }});
+}})();
 </script>
 <!-- AI YORDAMCHI FLOATING WINDOW -->
 <div id="aiWindow" style="display:none;position:fixed;bottom:20px;right:20px;width:380px;height:480px;
